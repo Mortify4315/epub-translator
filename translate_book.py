@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from ebooklib import epub
 from epub_translator import LLM, SubmitKind, language, translate
 
+import normalize
 from config import (
     CACHE_DIR,
     OUT_DIR,
@@ -18,11 +19,37 @@ from config import (
 from glossary import book_key, build_translation_prompt, merge_glossaries
 
 
+def prepare_epub(source_path: Path, work_dir: Path) -> Path:
+    book = epub.read_epub(source_path)
+    changed = False
+    for item in book.get_items():
+        if not isinstance(item, epub.EpubHtml):
+            continue
+        if item.get_name().lower().endswith(("nav.xhtml", "toc.xhtml")):
+            continue
+        normalized = normalize.normalize_html(item.get_content())
+        if normalized != item.get_content():
+            item.set_content(normalized)
+            changed = True
+    if not any(isinstance(item, epub.EpubNav) for item in book.get_items()):
+        book.add_item(epub.EpubNav())
+        book.spine = ["nav"] + [ref for ref, _ in book.spine]
+        changed = True
+    if not changed:
+        return source_path
+    work_dir.mkdir(parents=True, exist_ok=True)
+    prepared = work_dir / f"{source_path.stem}.prep.epub"
+    epub.write_epub(prepared, book)
+    return prepared
+
+
 def estimate(source_path: Path) -> dict:
     book = epub.read_epub(source_path)
     chapters = 0
     total_chars = 0
-    for item in book.get_items_of_type(epub.EpubHtml):
+    for item in book.get_items():
+        if not isinstance(item, epub.EpubHtml):
+            continue
         chapters += 1
         soup = BeautifulSoup(item.get_content(), "html.parser")
         for tag in soup(["script", "style"]):
@@ -42,6 +69,7 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
     prompt = build_translation_prompt(glossary)
     target_path = OUT_DIR / f"{source_path.stem}.en.epub"
     cache_path = CACHE_DIR / key
+    source_for_translation = prepare_epub(source_path, CACHE_DIR / "prep")
 
     llm = LLM(
         key=api_key,
@@ -55,7 +83,7 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
     )
 
     translate(
-        source_path=str(source_path),
+        source_path=str(source_for_translation),
         target_path=str(target_path),
         target_language=language.ENGLISH,
         submit=SubmitKind.REPLACE,
@@ -77,7 +105,12 @@ def main():
     parser = argparse.ArgumentParser(description="Translate an EPUB from Chinese to English.")
     parser.add_argument("epub", help="path to a .epub file in the 'books' folder")
     args = parser.parse_args()
-    result = run_translation(Path(args.epub))
+
+    def _print_progress(frac: float) -> None:
+        print(f"\rProgress: {frac * 100:5.1f}%", end="", flush=True)
+
+    result = run_translation(Path(args.epub), on_progress=_print_progress)
+    print()
     print(f"Saved to {result['target']}")
     print(f"Tokens: {result['input_tokens']:,} in / {result['output_tokens']:,} out   "
           f"Est. cost: ${result['cost']:.2f}")

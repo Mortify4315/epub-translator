@@ -161,7 +161,7 @@ def scan_flow() -> None:
         console.print("[yellow]Set your API key first (Settings).[/yellow]")
         return
     console.print("[cyan]Scanning the book for names, skills, and terms...[/cyan]")
-    candidates = scan_mod.candidate_terms(book, min_count=5, max_terms=120)
+    candidates = scan_mod.candidate_terms(book, min_count=5, max_terms=60)
     if not candidates:
         console.print("No candidate terms found.")
         return

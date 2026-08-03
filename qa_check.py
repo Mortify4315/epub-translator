@@ -12,7 +12,9 @@ from glossary import book_key, merge_glossaries
 def _chapter_texts(epub_path: Path) -> list:
     book = epub.read_epub(epub_path)
     texts = []
-    for item in book.get_items_of_type(epub.EpubHtml):
+    for item in book.get_items():
+        if not isinstance(item, epub.EpubHtml):
+            continue
         soup = BeautifulSoup(item.get_content(), "html.parser")
         for tag in soup(["script", "style"]):
             tag.decompose()
