@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 from ebooklib import epub
 from openai import OpenAI
 
-from config import get_api_key, get_base_url, get_model
+from config import get_api_key, get_base_url, get_extra_body, get_model
 from glossary import GLOBAL_NAME, add_terms, book_key, merge_glossaries
 
 CJK = re.compile(r"^[\u4e00-\u9fff]+$")
@@ -80,6 +80,7 @@ def propose_translations(terms: list, api_key: str, base_url: str, model: str, b
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
+            extra_body=get_extra_body(),
         )
         content = (resp.choices[0].message.content or "").strip()
         if content.startswith("{"):

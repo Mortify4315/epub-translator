@@ -1,12 +1,12 @@
 # Web Novel EPUB Translator
 
-Translate Chinese web novels (EPUB) into English using the **OpenCode Go** API, with a shared + per-novel glossary for consistent names, skills, and terms.
+Translate Chinese web novels (EPUB) into English using the **DeepSeek** API, with a shared + per-novel glossary for consistent names, skills, and terms.
 
 ## How to use
 
 1. **Install Python 3.13** from <https://www.python.org/downloads/> and tick **"Add python.exe to PATH"** during install. (Python 3.11, 3.12, or 3.13 all work.)
 2. Double-click **`run.bat`**. First run installs the required packages automatically.
-3. The first time you open it, paste your **OpenCode Go API key** (get one at <https://opencode.ai/auth>). It is stored locally in `settings.json` (never committed to git).
+3. The first time you open it, paste your **DeepSeek API key** (get one at <https://platform.deepseek.com/api_keys>). It is stored locally in `settings.json` (never committed to git).
 4. Put your `.epub` files in the **`books`** folder.
 5. Use the menu:
    - **Scan a book for new terms** — automatically finds character names / skills / terms and proposes English translations for you to approve.
@@ -33,11 +33,15 @@ Translate Chinese web novels (EPUB) into English using the **OpenCode Go** API, 
 
 ## Environment variables (optional)
 
-- `OPENCODE_GO_API_KEY` — overrides the saved API key.
-- `OPENCODE_GO_MODEL` — overrides the model (default `deepseek-v4-flash`).
-- `OPENCODE_GO_BASE_URL` — overrides the API endpoint (default `https://opencode.ai/zen/go/v1`).
+- `DEEPSEEK_API_KEY` — overrides the saved API key.
+- `DEEPSEEK_MODEL` — overrides the model (default `deepseek-v4-flash`).
+- `DEEPSEEK_BASE_URL` — overrides the API endpoint (default `https://api.deepseek.com`).
+
+(The old `OPENCODE_GO_*` variables still work as fallbacks.)
 
 ## Notes
 
-- Cost is estimated at $0.14 per million input tokens and $0.28 per million output tokens (DeepSeek V4 Flash via OpenCode Go). A ~1M-character novel typically costs well under $1.
+- Cost is estimated at $0.14 per million input tokens and $0.28 per million output tokens (DeepSeek V4 Flash). A ~1M-character novel typically costs well under $1.
+- **Fast mode (default):** thinking is disabled, so each request is a single fast pass with no reasoning tokens. Use **Settings → Change mode** to turn thinking on if you prefer maximum accuracy over speed.
+- DeepSeek may charge 2x during peak hours (9:00–12:00 and 14:00–18:00 Beijing time).
 - `epub-translator` requires Python 3.11–3.13; the launcher will warn you if your Python is incompatible.

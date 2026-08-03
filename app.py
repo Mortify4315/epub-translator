@@ -14,6 +14,8 @@ from config import (
     get_api_key,
     get_base_url,
     get_concurrency,
+    get_extra_body,
+    get_fill_thinking,
     get_model,
     load_settings,
     save_settings,
@@ -64,6 +66,8 @@ def run_translation_with_progress(book: Path) -> None:
             progress.update(task, completed=min(100.0, frac * 100))
 
         result = translate_mod.run_translation(book, on_progress=on_progress)
+    if result.get("cache_cleared"):
+        console.print("[yellow]Note: translation cache was cleared (thinking/fill mode changed).[/yellow]")
     console.print(f"[green]Done![/green]  Saved to: {result['target']}")
     console.print(
         f"Tokens: {result['input_tokens']:,} in / {result['output_tokens']:,} out   "
@@ -76,7 +80,7 @@ def translate_flow() -> None:
     if not book:
         return
     if not get_api_key():
-        console.print("[yellow]Set your OpenCode Go API key first (Settings).[/yellow]")
+        console.print("[yellow]Set your DeepSeek API key first (Settings).[/yellow]")
         return
     key = book_key(book.name)
     est = translate_mod.estimate(book)
@@ -225,20 +229,30 @@ def settings_flow() -> None:
     while True:
         key = get_api_key()
         masked = (key[:6] + "..." + key[-4:]) if len(key) > 12 else "(empty)"
+        thinking = "thinking on" if get_extra_body()["thinking"]["type"] == "enabled" else "fast (no thinking)"
         console.print(
             Panel(
                 "[bold]Settings[/bold]\n"
                 f"API key: {masked}\n"
-                f"Model: {get_model()}   Parallel requests: {get_concurrency()}"
+                f"Model: {get_model()}   API: {get_base_url()}\n"
+                f"Parallel requests: {get_concurrency()}   Mode: {thinking}\n"
+                f"Fill mode: {get_fill_thinking()}"
             )
         )
         choice = questionary.select(
             "Actions",
-            choices=["Set / change API key", "Change model", "Change concurrency", "Back"],
+            choices=[
+                "Set / change API key",
+                "Change model",
+                "Change concurrency",
+                "Change mode (speed vs. quality)",
+                "Change fill mode (structure mapping)",
+                "Back",
+            ],
         ).ask()
         if choice == "Set / change API key":
             new_key = questionary.text(
-                "OpenCode Go API key (from opencode.ai/auth):"
+                "DeepSeek API key (from https://platform.deepseek.com/api_keys):"
             ).ask()
             if new_key:
                 set_api_key(new_key)
@@ -253,12 +267,43 @@ def settings_flow() -> None:
                 save_settings(settings)
         elif choice == "Change concurrency":
             new_value = questionary.text(
-                "Parallel requests (1-8, default 4):", default=str(get_concurrency())
+                "Parallel requests (1-16, default 8):", default=str(get_concurrency())
             ).ask()
             if new_value and new_value.isdigit():
                 settings = load_settings()
                 settings["concurrency"] = int(new_value)
                 save_settings(settings)
+        elif choice == "Change mode (speed vs. quality)":
+            new_mode = questionary.select(
+                "Mode",
+                choices=[
+                    questionary.Choice(title="Fast (no thinking) — recommended", value="disabled"),
+                    questionary.Choice(title="Accurate (thinking on) — slower", value="enabled"),
+                ],
+            ).ask()
+            if new_mode:
+                settings = load_settings()
+                settings["thinking"] = new_mode
+                save_settings(settings)
+                console.print("[green]Mode saved.[/green]")
+        elif choice == "Change fill mode (structure mapping)":
+            new_mode = questionary.select(
+                "Fill mode",
+                choices=[
+                    questionary.Choice(title="Adaptive (recommended)", value="adaptive"),
+                    questionary.Choice(title="Thinking on — most accurate", value="enabled"),
+                    questionary.Choice(title="No thinking — fastest", value="disabled"),
+                ],
+            ).ask()
+            if new_mode:
+                settings = load_settings()
+                settings["fill_thinking"] = new_mode
+                save_settings(settings)
+                console.print(
+                    "[green]Fill mode saved.[/green] "
+                    "[yellow]Changing it clears the book's translation cache — "
+                    "the next translate re-does the full book.[/yellow]"
+                )
         else:
             return
 
@@ -303,10 +348,10 @@ def main() -> None:
     console.clear()
     if not get_api_key():
         console.print(
-            "[yellow]Welcome! Before translating, set your OpenCode Go API key "
-            "(get one at opencode.ai/auth).[/yellow]"
+            "[yellow]Welcome! Before translating, set your DeepSeek API key "
+            "(get one at https://platform.deepseek.com/api_keys).[/yellow]"
         )
-        new_key = questionary.text("OpenCode Go API key:").ask()
+        new_key = questionary.text("DeepSeek API key:").ask()
         if new_key:
             set_api_key(new_key)
             console.print("[green]API key saved.[/green]")

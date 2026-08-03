@@ -9,11 +9,14 @@ GLOSSARY_DIR = BASE_DIR / "glossaries"
 CACHE_DIR = BASE_DIR / "cache"
 SETTINGS_FILE = BASE_DIR / "settings.json"
 
-GO_BASE_URL_DEFAULT = "https://opencode.ai/zen/go/v1"
-GO_MODEL_DEFAULT = "deepseek-v4-flash"
+DEEPSEEK_BASE_URL_DEFAULT = "https://api.deepseek.com"
+DEEPSEEK_MODEL_DEFAULT = "deepseek-v4-flash"
 TOKEN_ENCODING = "cl100k_base"
 INPUT_PRICE_PER_M = 0.14
 OUTPUT_PRICE_PER_M = 0.28
+MAX_GROUP_TOKENS_DEFAULT = 5000
+CONCURRENCY_DEFAULT = 8
+FILL_THINKING_DEFAULT = "adaptive"
 
 for _dir in (BOOKS_DIR, OUT_DIR, GLOSSARY_DIR, CACHE_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
@@ -33,7 +36,9 @@ def save_settings(settings: dict) -> None:
 
 
 def get_api_key() -> str:
-    key = os.environ.get("OPENCODE_GO_API_KEY", "").strip()
+    key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if not key:
+        key = os.environ.get("OPENCODE_GO_API_KEY", "").strip()
     if not key:
         key = str(load_settings().get("api_key", "")).strip()
     return key
@@ -46,20 +51,51 @@ def set_api_key(key: str) -> None:
 
 
 def get_model() -> str:
-    return (os.environ.get("OPENCODE_GO_MODEL", "").strip()
+    return (os.environ.get("DEEPSEEK_MODEL", "").strip()
+            or os.environ.get("OPENCODE_GO_MODEL", "").strip()
             or str(load_settings().get("model", "")).strip()
-            or GO_MODEL_DEFAULT)
+            or DEEPSEEK_MODEL_DEFAULT)
 
 
 def get_base_url() -> str:
-    return os.environ.get("OPENCODE_GO_BASE_URL", "").strip() or GO_BASE_URL_DEFAULT
+    return (os.environ.get("DEEPSEEK_BASE_URL", "").strip()
+            or os.environ.get("OPENCODE_GO_BASE_URL", "").strip()
+            or DEEPSEEK_BASE_URL_DEFAULT)
 
 
 def get_concurrency() -> int:
     try:
-        return int(load_settings().get("concurrency", 4))
+        return int(load_settings().get("concurrency", CONCURRENCY_DEFAULT))
     except (TypeError, ValueError):
-        return 4
+        return CONCURRENCY_DEFAULT
+
+
+def get_max_group_tokens() -> int:
+    try:
+        return int(load_settings().get("max_group_tokens", MAX_GROUP_TOKENS_DEFAULT))
+    except (TypeError, ValueError):
+        return MAX_GROUP_TOKENS_DEFAULT
+
+
+def get_extra_body() -> dict:
+    thinking = str(load_settings().get("thinking", "disabled")).strip().lower()
+    return _thinking_extra_body(thinking)
+
+
+def get_fill_thinking() -> str:
+    thinking = (os.environ.get("DEEPSEEK_FILL_THINKING", "").strip()
+                or str(load_settings().get("fill_thinking", "")).strip().lower())
+    return thinking if thinking in ("adaptive", "enabled", "disabled") else FILL_THINKING_DEFAULT
+
+
+def get_fill_extra_body() -> dict:
+    return _thinking_extra_body(get_fill_thinking())
+
+
+def _thinking_extra_body(thinking: str) -> dict:
+    if thinking == "adaptive":
+        return {"thinking": {"type": "adaptive"}}
+    return {"thinking": {"type": "enabled" if thinking == "enabled" else "disabled"}}
 
 
 def estimate_cost(input_tokens: int, output_tokens: int) -> float:
