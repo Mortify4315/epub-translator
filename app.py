@@ -9,6 +9,7 @@ from flask import Blueprint, Flask, jsonify, send_from_directory
 from werkzeug.exceptions import HTTPException
 
 import core_loader as core
+from routes_settings import settings_payload
 
 app = Flask(__name__, static_folder="static")
 app.json.ensure_ascii = False
@@ -36,6 +37,32 @@ def index():
 @app.get("/api/ping")
 def ping():
     return jsonify({"ok": True, "core": core.config.BASE_DIR.name})
+
+
+@app.get("/api/bootstrap")
+def bootstrap():
+    books = [
+        {"name": p.name, "key": core.glossary.book_key(p.name)}
+        for p in sorted(core.config.BOOKS_DIR.glob("*.epub"))
+    ]
+    out = [p.name for p in sorted(core.config.OUT_DIR.glob("*.epub"))]
+    glossaries = [{
+        "key": core.glossary.GLOBAL_NAME,
+        "label": "Shared (all books)",
+        "count": len(core.glossary.load_glossary(core.glossary.GLOBAL_NAME)),
+    }]
+    for book in books:
+        glossaries.append({
+            "key": book["key"],
+            "label": book["name"],
+            "count": len(core.glossary.load_glossary(book["key"])),
+        })
+    return jsonify({
+        "books": books,
+        "out": out,
+        "glossaries": glossaries,
+        "settings": settings_payload(),
+    })
 
 
 def register_blueprints():
