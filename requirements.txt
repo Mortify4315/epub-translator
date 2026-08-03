@@ -1,0 +1,7 @@
+epub-translator
+ebooklib
+beautifulsoup4
+jieba
+openai
+rich
+questionary
