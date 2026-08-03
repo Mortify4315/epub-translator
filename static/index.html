@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Web Novel EPUB Translator</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Web Novel EPUB Translator</h1>
+      <span id="api-state" class="pill">Loading…</span>
+    </header>
+    <nav id="tabs" class="tabs"></nav>
+    <main>
+      <section id="view-translate" class="view">
+        <div class="card">
+          <div class="card-title">Pick a book</div>
+          <div class="row">
+            <select id="book-select" class="grow"></select>
+            <label class="btn" for="upload-input">Upload EPUB…</label>
+            <input id="upload-input" type="file" accept=".epub" hidden>
+          </div>
+          <p class="hint">Books live in the <code>books</code> folder of the epub-translator project.</p>
+        </div>
+        <div id="estimate" class="card hidden">
+          <div class="card-title">Estimate</div>
+          <dl class="grid2">
+            <div><dt>Chapters</dt><dd id="est-chapters"></dd></div>
+            <div><dt>Est. tokens</dt><dd id="est-tokens"></dd></div>
+            <div><dt>Est. cost</dt><dd id="est-cost"></dd></div>
+            <div><dt>Model</dt><dd id="est-model"></dd></div>
+          </dl>
+          <button id="start-translate" class="btn primary" disabled>Start translation</button>
+        </div>
+        <div id="translate-job" class="card hidden">
+          <div class="card-title">Translation</div>
+          <div class="progress"><div id="translate-bar" class="bar" style="width:0%"></div></div>
+          <p id="translate-msg" class="hint"></p>
+          <div id="translate-result" class="hidden">
+            <p id="translate-summary"></p>
+            <a id="download-link" class="btn" href="#">Download EPUB</a>
+            <p id="cache-warning" class="warn hidden">Translation cache was cleared (thinking/fill mode changed).</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-glossary" class="view hidden">
+        <div class="card">
+          <div class="card-title">Glossary</div>
+          <p class="warn">Editing a glossary clears that book's translation cache — the next translate re-translates the whole book.</p>
+          <div class="row">
+            <select id="scope-select" class="grow"></select>
+            <button id="add-term-btn" class="btn primary">Add term</button>
+          </div>
+          <table id="term-table">
+            <thead><tr><th>Chinese</th><th>English</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <div id="add-term-form" class="row hidden">
+            <input id="new-src" placeholder="Chinese term (e.g. 丹田)">
+            <input id="new-dst" placeholder="English translation">
+            <button id="save-term-btn" class="btn primary">Save</button>
+            <button id="cancel-term-btn" class="btn">Cancel</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-scan" class="view hidden">
+        <div class="card">
+          <div class="card-title">Scan for new terms</div>
+          <div class="row">
+            <select id="scan-book" class="grow"></select>
+            <button id="start-scan" class="btn primary" disabled>Scan</button>
+          </div>
+          <div id="scan-progress" class="hidden">
+            <div class="progress"><div id="scan-bar" class="bar" style="width:0%"></div></div>
+            <p id="scan-msg" class="hint"></p>
+          </div>
+          <div id="scan-result" class="hidden">
+            <p id="scan-summary" class="hint"></p>
+            <div id="scan-list"></div>
+            <button id="accept-scan" class="btn primary" disabled>Add selected to glossary</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-qa" class="view hidden">
+        <div class="card">
+          <div class="card-title">Check translation quality</div>
+          <div class="row">
+            <select id="qa-source" class="grow"></select>
+            <select id="qa-target" class="grow"></select>
+            <button id="run-qa" class="btn primary" disabled>Run check</button>
+          </div>
+          <div id="qa-result" class="hidden"></div>
+        </div>
+      </section>
+
+      <section id="view-settings" class="view hidden">
+        <div class="card">
+          <div class="card-title">Settings</div>
+          <label for="setting-key">DeepSeek API key</label>
+          <div class="row">
+            <input id="setting-key" type="password" placeholder="(unchanged)">
+            <button id="save-key" class="btn primary">Save key</button>
+          </div>
+          <p class="hint">Get one at platform.deepseek.com/api_keys. Stored locally in settings.json.</p>
+          <label for="setting-model">Model</label>
+          <select id="setting-model">
+            <option value="deepseek-v4-flash">deepseek-v4-flash</option>
+            <option value="deepseek-v4-pro">deepseek-v4-pro</option>
+          </select>
+          <label for="setting-concurrency">Parallel requests (1–16)</label>
+          <input id="setting-concurrency" type="number" min="1" max="16">
+          <label for="setting-thinking">Translate mode</label>
+          <select id="setting-thinking">
+            <option value="disabled">Fast (no thinking) — recommended</option>
+            <option value="enabled">Accurate (thinking on) — slower</option>
+          </select>
+          <label for="setting-fill">Fill mode (structure mapping)</label>
+          <select id="setting-fill">
+            <option value="adaptive">Adaptive — recommended</option>
+            <option value="enabled">Thinking on — most accurate</option>
+            <option value="disabled">No thinking — fastest</option>
+          </select>
+          <p class="warn">Changing translate/fill mode clears the book's translation cache.</p>
+          <button id="save-settings" class="btn primary">Save settings</button>
+        </div>
+      </section>
+    </main>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js"></script>
+  <script src="/static/translate.js"></script>
+  <script src="/static/glossary.js"></script>
+  <script src="/static/scan.js"></script>
+  <script src="/static/qa.js"></script>
+  <script src="/static/settings.js"></script>
+</body>
+</html>
