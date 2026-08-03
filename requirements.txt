@@ -1,0 +1,7 @@
+flask>=3.0
+epub-translator
+ebooklib
+beautifulsoup4
+jieba
+openai
+pytest
