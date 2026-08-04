@@ -86,7 +86,7 @@ def _ensure_cache_matches_config(cache_path: Path, config: dict) -> bool:
 def run_translation(source_path: Path, on_progress=None) -> dict:
     api_key = get_api_key()
     if not api_key:
-        raise RuntimeError("No API key configured. Set it in Settings or OPENCODE_GO_API_KEY.")
+        raise RuntimeError("No API key configured. Set it in Settings or DEEPSEEK_API_KEY.")
     key = book_key(source_path.name)
     glossary = merge_glossaries(key)
     prompt = build_translation_prompt(glossary)

@@ -38,8 +38,6 @@ def save_settings(settings: dict) -> None:
 def get_api_key() -> str:
     key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if not key:
-        key = os.environ.get("OPENCODE_GO_API_KEY", "").strip()
-    if not key:
         key = str(load_settings().get("api_key", "")).strip()
     return key
 
@@ -52,14 +50,12 @@ def set_api_key(key: str) -> None:
 
 def get_model() -> str:
     return (os.environ.get("DEEPSEEK_MODEL", "").strip()
-            or os.environ.get("OPENCODE_GO_MODEL", "").strip()
             or str(load_settings().get("model", "")).strip()
             or DEEPSEEK_MODEL_DEFAULT)
 
 
 def get_base_url() -> str:
     return (os.environ.get("DEEPSEEK_BASE_URL", "").strip()
-            or os.environ.get("OPENCODE_GO_BASE_URL", "").strip()
             or DEEPSEEK_BASE_URL_DEFAULT)
 
 

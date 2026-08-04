@@ -92,7 +92,7 @@ false-positive and is handled by adding the variant to the glossary.
 ## 8. API & configuration (`config.py`)
 
 - Provider: DeepSeek OpenAI-compatible API. Base URL `https://api.deepseek.com`, model `deepseek-v4-flash` (also `deepseek-v4-pro`).
-- Auth: `settings.json` (gitignored) or env vars `DEEPSEEK_API_KEY` / `OPENCODE_GO_API_KEY` (legacy fallback), `DEEPSEEK_MODEL`, `DEEPSEEK_BASE_URL`.
+- Auth: `settings.json` (gitignored) or env vars `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `DEEPSEEK_BASE_URL`.
 - Thinking: toggleable (`{"thinking": {"type": "enabled|disabled"}}` sent via `extra_body`). **Default: disabled (fast).** Disabling removes reasoning tokens → dramatically lower cost/latency.
 - Pricing (per 1M tokens): $0.14 input / $0.28 output (flash); $0.0028 cache-hit input. Peak hours (09:00–12:00, 14:00–18:00 Beijing) are 2x. Concurrency limit: 2500.
 - `token_encoding = cl100k_base` is used by the engine only as an approximation for grouping; not the model's real tokenizer.

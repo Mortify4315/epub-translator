@@ -112,7 +112,7 @@ def main():
 
     api_key = get_api_key()
     if not api_key:
-        print("No API key configured. Set OPENCODE_GO_API_KEY or use the app Settings.")
+        print("No API key configured. Set DEEPSEEK_API_KEY or use the app Settings.")
         return
 
     path = Path(args.epub)

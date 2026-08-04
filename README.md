@@ -37,8 +37,6 @@ Translate Chinese web novels (EPUB) into English using the **DeepSeek** API, wit
 - `DEEPSEEK_MODEL` — overrides the model (default `deepseek-v4-flash`).
 - `DEEPSEEK_BASE_URL` — overrides the API endpoint (default `https://api.deepseek.com`).
 
-(The old `OPENCODE_GO_*` variables still work as fallbacks.)
-
 ## Notes
 
 - Cost is estimated at $0.14 per million input tokens and $0.28 per million output tokens (DeepSeek V4 Flash). A ~1M-character novel typically costs well under $1.
