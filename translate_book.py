@@ -20,9 +20,19 @@ from config import (
     get_fill_extra_body,
     get_fill_thinking,
     get_max_group_tokens,
+    get_max_retries,
     get_model,
+    get_retry_times,
+    get_token_budget,
 )
 from glossary import book_key, build_translation_prompt, merge_glossaries
+
+
+class BudgetExceeded(RuntimeError):
+    def __init__(self, budget: int, used: int) -> None:
+        super().__init__(f"Budget exceeded: used {used:,} of {budget:,} tokens.")
+        self.budget = budget
+        self.used = used
 
 
 def prepare_epub(source_path: Path, work_dir: Path) -> Path:
@@ -93,6 +103,7 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
     target_path = OUT_DIR / f"{source_path.stem}.en.epub"
     cache_path = CACHE_DIR / key
     source_for_translation = prepare_epub(source_path, CACHE_DIR / "prep")
+    budget = get_token_budget(source_path.name)
 
     config = _cache_config()
     cache_cleared = False
@@ -112,7 +123,7 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
             model=get_model(),
             token_encoding=TOKEN_ENCODING,
             cache_path=str(cache_path),
-            retry_times=5,
+            retry_times=get_retry_times(),
             retry_interval_seconds=6.0,
             temperature=0.4,
             extra_body=extra_body,
@@ -121,18 +132,30 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
     translation_llm = make_llm(get_extra_body())
     fill_llm = make_llm(get_fill_extra_body())
 
-    translate(
-        source_path=str(source_for_translation),
-        target_path=str(target_path),
-        target_language=language.ENGLISH,
-        submit=SubmitKind.REPLACE,
-        user_prompt=prompt,
-        translation_llm=translation_llm,
-        fill_llm=fill_llm,
-        concurrency=get_concurrency(),
-        max_group_tokens=get_max_group_tokens(),
-        on_progress=on_progress,
-    )
+    def budget_aware_progress(frac: float) -> None:
+        used = translation_llm.total_tokens + fill_llm.total_tokens
+        if used > budget:
+            raise BudgetExceeded(budget, used)
+        if on_progress:
+            on_progress(frac)
+
+    try:
+        translate(
+            source_path=str(source_for_translation),
+            target_path=str(target_path),
+            target_language=language.ENGLISH,
+            submit=SubmitKind.REPLACE,
+            user_prompt=prompt,
+            max_retries=get_max_retries(),
+            translation_llm=translation_llm,
+            fill_llm=fill_llm,
+            concurrency=get_concurrency(),
+            max_group_tokens=get_max_group_tokens(),
+            on_progress=budget_aware_progress,
+        )
+    except BudgetExceeded:
+        target_path.unlink(missing_ok=True)
+        raise
 
     input_tokens = translation_llm.input_tokens + fill_llm.input_tokens
     output_tokens = translation_llm.output_tokens + fill_llm.output_tokens
@@ -153,7 +176,13 @@ def main():
     def _print_progress(frac: float) -> None:
         print(f"\rProgress: {frac * 100:5.1f}%", end="", flush=True)
 
-    result = run_translation(Path(args.epub), on_progress=_print_progress)
+    try:
+        result = run_translation(Path(args.epub), on_progress=_print_progress)
+    except BudgetExceeded as err:
+        print()
+        print(f"Budget exceeded: used {err.used:,} of {err.budget:,} tokens — stopped.")
+        print("Cache kept. Re-run to resume from where it stopped.")
+        return
     print()
     if result.get("cache_cleared"):
         print("Note: translation cache was cleared (thinking/fill mode changed).")

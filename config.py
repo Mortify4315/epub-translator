@@ -17,6 +17,10 @@ OUTPUT_PRICE_PER_M = 0.28
 MAX_GROUP_TOKENS_DEFAULT = 5000
 CONCURRENCY_DEFAULT = 8
 FILL_THINKING_DEFAULT = "adaptive"
+TOKEN_BUDGET_DEFAULT = 1_500_000
+TOKEN_BUDGET_TEST_DEFAULT = 300_000
+MAX_RETRIES_DEFAULT = 2
+RETRY_TIMES_DEFAULT = 2
 
 for _dir in (BOOKS_DIR, OUT_DIR, GLOSSARY_DIR, CACHE_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
@@ -92,6 +96,29 @@ def _thinking_extra_body(thinking: str) -> dict:
     if thinking == "adaptive":
         return {"thinking": {"type": "adaptive"}}
     return {"thinking": {"type": "enabled" if thinking == "enabled" else "disabled"}}
+
+
+def get_token_budget(source_name: str) -> int:
+    key = "token_budget_test" if source_name.startswith("Test_") else "token_budget"
+    default = TOKEN_BUDGET_TEST_DEFAULT if source_name.startswith("Test_") else TOKEN_BUDGET_DEFAULT
+    try:
+        return int(load_settings().get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def get_max_retries() -> int:
+    try:
+        return int(load_settings().get("max_retries", MAX_RETRIES_DEFAULT))
+    except (TypeError, ValueError):
+        return MAX_RETRIES_DEFAULT
+
+
+def get_retry_times() -> int:
+    try:
+        return int(load_settings().get("retry_times", RETRY_TIMES_DEFAULT))
+    except (TypeError, ValueError):
+        return RETRY_TIMES_DEFAULT
 
 
 def estimate_cost(input_tokens: int, output_tokens: int) -> float:

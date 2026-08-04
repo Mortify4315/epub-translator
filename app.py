@@ -16,7 +16,9 @@ from config import (
     get_concurrency,
     get_extra_body,
     get_fill_thinking,
+    get_max_retries,
     get_model,
+    get_token_budget,
     load_settings,
     save_settings,
     set_api_key,
@@ -65,7 +67,14 @@ def run_translation_with_progress(book: Path) -> None:
         def on_progress(frac: float) -> None:
             progress.update(task, completed=min(100.0, frac * 100))
 
-        result = translate_mod.run_translation(book, on_progress=on_progress)
+        try:
+            result = translate_mod.run_translation(book, on_progress=on_progress)
+        except translate_mod.BudgetExceeded as err:
+            console.print(
+                f"[yellow]Budget exceeded: used {err.used:,} of {err.budget:,} tokens — stopped. "
+                "Cache kept; re-run to resume.[/yellow]"
+            )
+            return
     if result.get("cache_cleared"):
         console.print("[yellow]Note: translation cache was cleared (thinking/fill mode changed).[/yellow]")
     console.print(f"[green]Done![/green]  Saved to: {result['target']}")
@@ -236,7 +245,8 @@ def settings_flow() -> None:
                 f"API key: {masked}\n"
                 f"Model: {get_model()}   API: {get_base_url()}\n"
                 f"Parallel requests: {get_concurrency()}   Mode: {thinking}\n"
-                f"Fill mode: {get_fill_thinking()}"
+                f"Fill mode: {get_fill_thinking()}   Retries: {get_max_retries()}\n"
+                f"Token budget: {get_token_budget('book.epub'):,} (test: {get_token_budget('Test_.epub'):,})"
             )
         )
         choice = questionary.select(
@@ -247,6 +257,8 @@ def settings_flow() -> None:
                 "Change concurrency",
                 "Change mode (speed vs. quality)",
                 "Change fill mode (structure mapping)",
+                "Change token budget",
+                "Change retries (fill + API)",
                 "Back",
             ],
         ).ask()
@@ -304,6 +316,27 @@ def settings_flow() -> None:
                     "[yellow]Changing it clears the book's translation cache — "
                     "the next translate re-does the full book.[/yellow]"
                 )
+        elif choice == "Change token budget":
+            new_value = questionary.text(
+                "Token budget for normal books (default 1500000; Test_ books auto-use 300000):",
+                default=str(get_token_budget("book.epub")),
+            ).ask()
+            if new_value and new_value.isdigit():
+                settings = load_settings()
+                settings["token_budget"] = int(new_value)
+                save_settings(settings)
+                console.print("[green]Token budget saved.[/green]")
+        elif choice == "Change retries (fill + API)":
+            new_value = questionary.text(
+                "Retries per request (default 2, applies to both fill + API):",
+                default=str(get_max_retries()),
+            ).ask()
+            if new_value and new_value.isdigit():
+                settings = load_settings()
+                settings["max_retries"] = int(new_value)
+                settings["retry_times"] = int(new_value)
+                save_settings(settings)
+                console.print("[green]Retries saved.[/green]")
         else:
             return
 

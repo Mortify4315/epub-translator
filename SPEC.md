@@ -96,7 +96,8 @@ false-positive and is handled by adding the variant to the glossary.
 - Thinking: toggleable (`{"thinking": {"type": "enabled|disabled"}}` sent via `extra_body`). **Default: disabled (fast).** Disabling removes reasoning tokens → dramatically lower cost/latency.
 - Pricing (per 1M tokens): $0.14 input / $0.28 output (flash); $0.0028 cache-hit input. Peak hours (09:00–12:00, 14:00–18:00 Beijing) are 2x. Concurrency limit: 2500.
 - `token_encoding = cl100k_base` is used by the engine only as an approximation for grouping; not the model's real tokenizer.
-- Tuning knobs in `settings.json`: `concurrency` (default 8), `max_group_tokens` (default 5000), `thinking`, `fill_thinking` (default `adaptive`), `model`, `api_key`.
+- Tuning knobs in `settings.json`: `concurrency` (default 8), `max_group_tokens` (default 5000), `thinking`, `fill_thinking` (default `adaptive`), `model`, `api_key`, `token_budget` (default 1,500,000; `Test_` books auto-use `token_budget_test` default 300,000), `max_retries`/`retry_times` (default 2).
+- **Token budget guard**: `run_translation` polls cumulative tokens (both LLMs) after each chapter; over budget raises `BudgetExceeded`, aborting the run. Cache is kept, so a re-run resumes. Test books (`Test_*.epub`) get a tight default budget so failed test runs can't burn tokens.
 - **Two LLMs**: the translate pass uses `thinking` (speed/quality toggle); the fill pass uses `fill_thinking`
   (`adaptive` | `enabled` | `disabled`). The engine's cache key does NOT include thinking mode, so any change
   to `thinking`/`fill_thinking`/`model` clears that book's translation cache (config marker in `cache/<book>/config.json`).
@@ -118,7 +119,7 @@ false-positive and is handled by adding the variant to the glossary.
    thinking/fill/model invalidates the book cache (config marker auto-clear).
 2. Glossary edits silently invalidate the book's translation cache → forced full re-translation.
 3. Progress UI is per-request, not per-chapter; CLI prints nothing between requests.
-4. No `max_tokens` cap on engine calls → runaway reasoning when thinking is enabled.
+4. No `max_tokens` cap on engine calls → runaway reasoning when thinking is enabled (mitigated by the token-budget guard).
 5. `normalize.py` has no unit tests; it's the piece most likely to regress on other WebToEpub variants.
 6. Glossary scan default `max_terms=60` after a 120-term run timed out; not stress-tested on a full book.
 7. Global glossary still empty (`{}`) — scan→commit workflow not yet exercised end-to-end via the app.
