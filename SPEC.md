@@ -96,7 +96,7 @@ false-positive and is handled by adding the variant to the glossary.
 - Thinking: toggleable (`{"thinking": {"type": "enabled|disabled"}}` sent via `extra_body`). **Default: disabled (fast).** Disabling removes reasoning tokens → dramatically lower cost/latency.
 - Pricing (per 1M tokens): $0.14 input / $0.28 output (flash); $0.0028 cache-hit input. Peak hours (09:00–12:00, 14:00–18:00 Beijing) are 2x. Concurrency limit: 2500.
 - `token_encoding = cl100k_base` is used by the engine only as an approximation for grouping; not the model's real tokenizer.
-- Tuning knobs in `settings.json`: `concurrency` (default 8), `max_group_tokens` (default 5000), `thinking`, `fill_thinking` (default `adaptive`), `model`, `api_key`, `token_budget` (default 1,500,000; `Test_` books auto-use `token_budget_test` default 300,000), `max_retries`/`retry_times` (default 2).
+- Tuning knobs in `settings.json`: `concurrency` (default 8), `max_group_tokens` (default 5000), `thinking`, `fill_thinking` (default `adaptive`), `model`, `api_key`, `token_budget` (default 1,500,000; `Test_` books auto-use `token_budget_test` default 500,000), `max_retries`/`retry_times` (default 2).
 - **Token budget guard**: `run_translation` polls cumulative tokens (both LLMs) after each chapter; over budget raises `BudgetExceeded`, aborting the run. Cache is kept, so a re-run resumes. Test books (`Test_*.epub`) get a tight default budget so failed test runs can't burn tokens.
 - **Two LLMs**: the translate pass uses `thinking` (speed/quality toggle); the fill pass uses `fill_thinking`
   (`adaptive` | `enabled` | `disabled`). The engine's cache key does NOT include thinking mode, so any change
