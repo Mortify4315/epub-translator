@@ -102,6 +102,29 @@ false-positive and is handled by adding the variant to the glossary.
   (`adaptive` | `enabled` | `disabled`). The engine's cache key does NOT include thinking mode, so any change
   to `thinking`/`fill_thinking`/`model` clears that book's translation cache (config marker in `cache/<book>/config.json`).
 
+### Measured speed (2026-08-05, Test_ book: 13 chapters, 22,810 CJK chars)
+
+All arms: fresh isolated cache, translate thinking disabled, fill thinking adaptive, `deepseek-v4-flash`:
+
+| arm | concurrency | max_group_tokens | wall | requests | cost | CJK remnants | → 1000 ch |
+|-----|-------------|------------------|------|----------|------|--------------|-----------|
+| control | 8 | 5000 | 270.8 s | 74 | $0.085 | 0 | ≈ 5.8 h |
+| e1 | 32 | 5000 | 117.3 s | 74 | $0.088 | 1* | ≈ 2.5 h |
+| e2 | 64 | 5000 | 71.4 s | 74 | $0.079 | 1* | ≈ 1.5 h |
+| e3 | 16 | 10000 | 255.0 s | 50 | $0.105 | 0 | ≈ 5.4 h |
+| **e4 — adopted** | 32 | 10000 | 128.5 s | 50 | $0.100 | 0 | ≈ 2.8 h |
+| e5 | 64 | 10000 | 158.7 s | 50 | $0.103 | 0 | ≈ 3.4 h |
+
+\* single *intentional* CJK glyph `凹` — the model quoted the character ("three-dimensional `凹` shape"),
+not a fill-backfill regression (cf. §9.1). All arms: `<p>` counts exact vs prep, `qa_check` 0 issues.
+
+Adopted config (in `settings.json`): `concurrency=32`, `max_group_tokens=10000`.
+
+- 10k groups cut request count 74→50 and stayed CJK-clean; 32 beats 64 at 10k (bigger payloads saturate
+  concurrency earlier), 64 beats 32 at 5k (no 429/retry noise at either).
+- Expected ≈ 2.75–3 h / 1000 chapters (above the 1.5–2 h target; 64/5000 gives ≈ 1.5 h but with the `凹` caveat).
+- Cost ≈ $6–8 / 1000 chapters, roughly unchanged from baseline.
+
 ## 9. Known issues / open items
 
 1. **Fill-step can backfill Chinese (RESOLVED 2026-08-03).** When the fill model can't align the
@@ -123,6 +146,7 @@ false-positive and is handled by adding the variant to the glossary.
 5. `normalize.py` has no unit tests; it's the piece most likely to regress on other WebToEpub variants.
 6. Glossary scan default `max_terms=60` after a 120-term run timed out; not stress-tested on a full book.
 7. Global glossary still empty (`{}`) — scan→commit workflow not yet exercised end-to-end via the app.
+8. `estimate()` is ~10× off: it reported ~39k tokens for the Test_ book that actually used ~386k (counts only a translate-input heuristic, ignoring fill-pass XML resends + output + reasoning). The confirm-dialog cost estimate is misleading.
 
 ## 10. Verification discipline
 
