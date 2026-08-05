@@ -1,8 +1,10 @@
 let SCAN_SCOPE = null;
+let _scanJobId = null;
 
 function initScan() {
   $("#start-scan").addEventListener("click", startScan);
   $("#accept-scan").addEventListener("click", acceptScan);
+  $("#stop-scan").addEventListener("click", stopScan);
 }
 
 async function startScan() {
@@ -13,14 +15,49 @@ async function startScan() {
   SCAN_SCOPE = book.key;
   try {
     const job = await api("/api/scan", { method: "POST", body: { book: name } });
+    _scanJobId = job.id;
     $("#scan-bar").style.width = "0%";
     $("#scan-result").classList.add("hidden");
     $("#scan-progress").classList.remove("hidden");
+    $("#scan-heartbeat").classList.add("hidden");
+    $("#scan-log").classList.remove("hidden");
+    $("#scan-log").innerHTML = "";
+    $("#stop-scan").classList.remove("hidden");
     $("#start-scan").disabled = true;
-    pollJob(job.id, "#scan-bar", "#scan-msg", renderScanResult, (job) => {
-      $("#start-scan").disabled = false;
-      toast("Scan failed: " + job.error, "error");
+    pollJob(job.id, {
+      barSel: "#scan-bar",
+      msgSel: "#scan-msg",
+      onTick: (j) => {
+        const last = Date.parse(j.last_event_at);
+        if (j.status === "running" && last && Date.now() - last > 15000) {
+          const secs = Math.floor((Date.now() - last) / 1000);
+          $("#scan-heartbeat").textContent = `Still working… (no update in ${secs}s)`;
+          $("#scan-heartbeat").classList.remove("hidden");
+        } else {
+          $("#scan-heartbeat").classList.add("hidden");
+        }
+      },
+      onLog: (entries) => appendLog("#scan-log", entries),
+      onDone: renderScanResult,
+      onError: (j) => {
+        $("#start-scan").disabled = false;
+        $("#stop-scan").classList.add("hidden");
+        toast("Scan failed: " + j.error, "error");
+      },
+      onStopped: () => {
+        $("#start-scan").disabled = false;
+        $("#stop-scan").classList.add("hidden");
+        toast("Scan stopped", "info");
+      },
     });
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function stopScan() {
+  if (!confirm("Stop the scan?")) return;
+  if (!_scanJobId) return;
+  try {
+    await api("/api/jobs/" + _scanJobId + "/stop", { method: "POST", body: {} });
   } catch (e) { toast(e.message, "error"); }
 }
 

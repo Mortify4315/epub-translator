@@ -36,8 +36,12 @@
         </div>
         <div id="translate-job" class="card hidden">
           <div class="card-title">Translation</div>
+          <p id="translate-chapters" class="chapter"></p>
           <div class="progress"><div id="translate-bar" class="bar" style="width:0%"></div></div>
           <p id="translate-msg" class="hint"></p>
+          <p id="translate-heartbeat" class="hint hidden"></p>
+          <button id="stop-translate" class="btn danger hidden">Stop</button>
+          <div id="translate-log" class="log hidden"></div>
           <div id="translate-result" class="hidden">
             <p id="translate-summary"></p>
             <a id="download-link" class="btn" href="#">Download EPUB</a>
@@ -78,6 +82,9 @@
             <div class="progress"><div id="scan-bar" class="bar" style="width:0%"></div></div>
             <p id="scan-msg" class="hint"></p>
           </div>
+          <p id="scan-heartbeat" class="hint hidden"></p>
+          <button id="stop-scan" class="btn danger hidden">Stop</button>
+          <div id="scan-log" class="log hidden"></div>
           <div id="scan-result" class="hidden">
             <p id="scan-summary" class="hint"></p>
             <div id="scan-list"></div>

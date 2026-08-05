@@ -95,15 +95,38 @@ async function refresh() {
   updateButtons();
 }
 
-function pollJob(id, barSel, msgSel, onDone, onError) {
+function appendLog(sel, entries) {
+  const box = $(sel);
+  for (const e of entries) {
+    const line = el("div", "log-line" + (e.level === "warn" ? " log-warn" : e.level === "error" ? " log-error" : ""));
+    const time = el("span", "t", new Date(e.t).toLocaleTimeString());
+    const msg = el("span", "m", e.msg);
+    line.append(time, msg);
+    box.appendChild(line);
+  }
+  while (box.childElementCount > 500) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+}
+
+function pollJob(id, opts = {}) {
+  const { barSel, msgSel, onTick, onLog, onDone, onError, onStopped } = opts;
+  let after = 0;
   const interval = setInterval(async () => {
     let job;
     try { job = await api("/api/jobs/" + id); }
     catch (e) { clearInterval(interval); toast(e.message, "error"); return; }
-    $(barSel).style.width = job.progress + "%";
+    if (barSel) $(barSel).style.width = job.progress + "%";
     if (msgSel) $(msgSel).textContent = job.message || "";
-    if (job.status === "done") { clearInterval(interval); onDone(job); }
-    else if (job.status === "error") { clearInterval(interval); onError(job); }
+    if (job.status === "running" && onLog) {
+      try {
+        const lg = await api("/api/jobs/" + id + "/log?after=" + after);
+        if (lg.total > after) { onLog(lg.entries); after = lg.total; }
+      } catch (e) { /* transient log fetch — ignore */ }
+    }
+    if (onTick) onTick(job);
+    if (job.status === "done") { clearInterval(interval); if (onDone) onDone(job); }
+    else if (job.status === "error") { clearInterval(interval); if (onError) onError(job); }
+    else if (job.status === "stopped") { clearInterval(interval); (onStopped || onError) && (onStopped || onError)(job); }
   }, 1000);
 }
 
