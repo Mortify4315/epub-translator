@@ -81,6 +81,7 @@ def _cache_config() -> dict:
         "thinking": get_extra_body()["thinking"]["type"],
         "fill_thinking": get_fill_thinking(),
         "model": get_model(),
+        "max_group_tokens": get_max_group_tokens(),
     }
 
 
