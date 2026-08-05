@@ -1,7 +1,7 @@
 __pycache__/
 *.py[cod]
 .venv/
-books/*.epub
+**/books/*.epub
 out/
 cache/
 settings.json
