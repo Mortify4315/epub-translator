@@ -3,13 +3,13 @@ import sys
 from pathlib import Path
 
 CORE_DIR = Path(
-    os.environ.get("EPUB_TRANSLATOR_PATH", str(Path(__file__).resolve().parent.parent / "epub-translator"))
+    os.environ.get("EPUB_TRANSLATOR_PATH", str(Path(__file__).resolve().parent.parent / "cli"))
 ).resolve()
 
 if not (CORE_DIR / "translate_book.py").exists():
     raise SystemExit(
         f"epub-translator core not found at {CORE_DIR}. "
-        "Clone it there or set the EPUB_TRANSLATOR_PATH environment variable."
+        "Expected the cli/ subfolder of this repository, or set the EPUB_TRANSLATOR_PATH environment variable."
     )
 
 sys.path.insert(0, str(CORE_DIR))

@@ -2,7 +2,7 @@
 
 Mirrors translate_book.run_translation so we can forward on_fill_failed into
 the job log. If the sibling run_translation gains new knobs, update this file
-to match (the sibling epub-translator repo is read-only input).
+to match (the cli/ subfolder is treated as read-only input).
 """
 import json
 import shutil
