@@ -1,6 +1,7 @@
 import argparse
 import json
 import shutil
+import time
 from pathlib import Path
 
 from bs4 import BeautifulSoup
@@ -15,6 +16,7 @@ from config import (
     estimate_cost,
     get_api_key,
     get_base_url,
+    get_chapter_limit,
     get_concurrency,
     get_extra_body,
     get_fill_extra_body,
@@ -36,6 +38,54 @@ class BudgetExceeded(RuntimeError):
         super().__init__(f"Budget exceeded: used {used:,} of {budget:,} tokens.")
         self.budget = budget
         self.used = used
+
+
+class ChapterLimitReached(RuntimeError):
+    """Raised by the progress callback when the configured chapter limit is
+    reached. Unlike BudgetExceeded the partial output is KEPT (finalized by
+    the engine's Zip context on clean exception exit), so each batch yields a
+    readable epub with the chapters translated so far."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"Chapter limit reached: {limit} chapters translated.")
+        self.limit = limit
+
+
+def count_headers(prepared_epub: Path) -> int:
+    """Number of pre-chapter on_progress calls the engine makes (TOC + metadata)."""
+    book = epub.read_epub(prepared_epub)
+    headers = 0
+    if any(isinstance(item, epub.EpubNav) for item in book.get_items()):
+        headers += 1
+    if book.metadata:
+        headers += 1
+    return headers
+
+
+def make_chapter_progress(total_chapters: int, headers: int, chapter_limit: int = 0,
+                          on_progress=None, on_chapter=None):
+    """Engine on_progress adapter that counts completed chapters and raises
+    ChapterLimitReached once chapter_limit chapters are done (0 = unlimited).
+    on_chapter(done, frac, total) is invoked per chapter completion."""
+    state = {"n": 0, "total": total_chapters, "last": time.monotonic()}
+
+    def callback(frac: float) -> None:
+        state["n"] += 1
+        done = max(0, min(state["total"], state["n"] - headers))
+        if frac >= 0.999:
+            state["total"] = done
+        if on_chapter:
+            on_chapter(done, frac, state["total"])
+        if on_progress:
+            on_progress(frac)
+        if chapter_limit and done >= chapter_limit:
+            raise ChapterLimitReached(chapter_limit)
+        state["last"] = time.monotonic()
+
+    def elapsed_since_last() -> float:
+        return time.monotonic() - state["last"]
+
+    return callback, elapsed_since_last
 
 
 def prepare_epub(source_path: Path, work_dir: Path) -> Path:
@@ -150,6 +200,11 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
     translation_llm = make_llm(get_extra_body())
     fill_llm = make_llm(get_fill_extra_body())
 
+    est = estimate(source_path)
+    headers = count_headers(source_for_translation)
+    chapter_limit = get_chapter_limit()
+    budget = get_token_budget(source_path.name)
+
     def budget_aware_progress(frac: float) -> None:
         used = translation_llm.total_tokens + fill_llm.total_tokens
         if used > budget:
@@ -157,6 +212,10 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
         if on_progress:
             on_progress(frac)
 
+    on_chapter_progress, _elapsed = make_chapter_progress(
+        est["chapters"], headers, chapter_limit, on_progress=budget_aware_progress)
+
+    chapter_limited = False
     try:
         translate(
             source_path=str(source_for_translation),
@@ -169,11 +228,14 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
             fill_llm=fill_llm,
             concurrency=get_concurrency(),
             max_group_tokens=get_max_group_tokens(),
-            on_progress=budget_aware_progress,
+            on_progress=on_chapter_progress,
         )
     except BudgetExceeded:
         target_path.unlink(missing_ok=True)
         raise
+    except ChapterLimitReached:
+        # Partial output is intentional (batch mode): keep the finalized epub.
+        chapter_limited = True
 
     input_tokens = translation_llm.input_tokens + fill_llm.input_tokens
     output_tokens = translation_llm.output_tokens + fill_llm.output_tokens
@@ -183,6 +245,7 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
         "output_tokens": output_tokens,
         "cost": estimate_cost(input_tokens, output_tokens),
         "cache_cleared": cache_cleared,
+        "chapter_limited": chapter_limited,
     }
 
 
@@ -204,6 +267,9 @@ def main():
     print()
     if result.get("cache_cleared"):
         print("Note: translation cache was cleared (provider/base URL/model or mode changed).")
+    if result.get("chapter_limited"):
+        print("Note: stopped at the configured chapter limit — output epub contains the "
+              "chapters translated so far. Re-run (or raise chapter_limit) to continue.")
     print(f"Saved to {result['target']}")
     print(f"Tokens: {result['input_tokens']:,} in / {result['output_tokens']:,} out   "
           f"Est. cost: ${result['cost']:.2f}")

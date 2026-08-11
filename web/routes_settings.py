@@ -31,6 +31,7 @@ def settings_payload():
         "base_url": core.config.get_base_url(),
         "concurrency": core.config.get_concurrency(),
         "max_group_tokens": core.config.get_max_group_tokens(),
+        "chapter_limit": core.config.get_chapter_limit(),
         "thinking": core.config.get_thinking(),
         "fill_thinking": core.config.get_fill_thinking(),
     }
@@ -90,6 +91,11 @@ def update_settings():
             s["max_group_tokens"] = int(data["max_group_tokens"])
         except (TypeError, ValueError):
             abort(400, "max_group_tokens must be an integer.")
+    if "chapter_limit" in data:
+        try:
+            s["chapter_limit"] = max(0, int(data["chapter_limit"]))
+        except (TypeError, ValueError):
+            abort(400, "chapter_limit must be a non-negative integer (0 = unlimited).")
     if data.get("thinking") in ("enabled", "disabled"):
         s["thinking"] = data["thinking"]
     if data.get("fill_thinking") in ("adaptive", "enabled", "disabled"):

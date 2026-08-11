@@ -94,6 +94,17 @@ def test_token_budget_naming(tmp_path, monkeypatch):
     assert config.get_token_budget("赤心巡天_test.epub") == 500000
 
 
+def test_chapter_limit(tmp_path, monkeypatch):
+    _fresh_settings(tmp_path, monkeypatch, {})
+    assert config.get_chapter_limit() == 0  # default: unlimited
+    _fresh_settings(tmp_path, monkeypatch, {"chapter_limit": 403})
+    assert config.get_chapter_limit() == 403
+    _fresh_settings(tmp_path, monkeypatch, {"chapter_limit": -5})
+    assert config.get_chapter_limit() == 0
+    _fresh_settings(tmp_path, monkeypatch, {"chapter_limit": "bogus"})
+    assert config.get_chapter_limit() == 0
+
+
 def test_concurrency_clamped(tmp_path, monkeypatch):
     _fresh_settings(tmp_path, monkeypatch, {"concurrency": 32})
     assert config.get_concurrency() == 32

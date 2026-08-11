@@ -8,7 +8,6 @@ import json
 import shutil
 import sys
 import threading
-import time
 from pathlib import Path
 
 import core_loader as core
@@ -24,33 +23,18 @@ def emit_log(level: str, msg: str) -> None:
 
 def count_headers(prepared_epub: Path) -> int:
     """Number of pre-chapter on_progress calls the engine makes (TOC + metadata)."""
-    from ebooklib import epub
-    book = epub.read_epub(prepared_epub)
-    headers = 0
-    if any(isinstance(item, epub.EpubNav) for item in book.get_items()):
-        headers += 1
-    if book.metadata:
-        headers += 1
-    return headers
+    return core.translate_book.count_headers(prepared_epub)
 
 
-def make_progress_callback(estimate_total: int, headers: int):
-    state = {"n": 0, "total": estimate_total, "last": time.monotonic()}
-
-    def on_progress(frac: float) -> None:
-        state["n"] += 1
-        done = max(0, min(state["total"], state["n"] - headers))
-        if frac >= 0.999:
-            state["total"] = done
+def make_progress_callback(estimate_total: int, headers: int, chapter_limit: int = 0):
+    """Shared chapter-counting progress adapter + per-chapter progress events."""
+    def on_chapter(done: int, frac: float, total: int) -> None:
         _emit({"type": "progress", "frac": frac,
-               "chapters_done": done, "chapters_total": state["total"],
-               "msg": f"Chapter {done}/{state['total']} done"})
-        state["last"] = time.monotonic()
+               "chapters_done": done, "chapters_total": total,
+               "msg": f"Chapter {done}/{total} done"})
 
-    def elapsed_since_last() -> float:
-        return time.monotonic() - state["last"]
-
-    return on_progress, elapsed_since_last
+    return core.translate_book.make_chapter_progress(
+        estimate_total, headers, chapter_limit=chapter_limit, on_chapter=on_chapter)
 
 
 def start_heartbeat(elapsed_since_last):
@@ -130,7 +114,9 @@ def run_translate(book_name: str) -> None:
     est = core.translate_book.estimate(source_path)
     headers = count_headers(source_for_translation)
     chapters_total = est["chapters"]
-    on_progress, elapsed_since_last = make_progress_callback(chapters_total, headers)
+    chapter_limit = core.config.get_chapter_limit()
+    on_progress, elapsed_since_last = make_progress_callback(
+        chapters_total, headers, chapter_limit=chapter_limit)
     stop_heartbeat = start_heartbeat(elapsed_since_last)
 
     def on_fill_failed(event):
@@ -144,6 +130,7 @@ def run_translate(book_name: str) -> None:
         on_progress(frac)
 
     emit_log("info", f"Translating {chapters_total} chapters (model {core.config.get_model()})…")
+    chapter_limited = False
     try:
         core.translate_book.translate(
             source_path=str(source_for_translation),
@@ -165,6 +152,10 @@ def run_translate(book_name: str) -> None:
                           f"Cache kept; re-run to resume.")
         stop_heartbeat.set()
         raise
+    except core.translate_book.ChapterLimitReached as err:
+        chapter_limited = True
+        emit_log("info", f"Chapter limit reached ({err.limit}) — partial epub finalized; "
+                          f"re-run to continue from cache.")
     stop_heartbeat.set()
 
     input_tokens = translation_llm.input_tokens + fill_llm.input_tokens
@@ -177,6 +168,7 @@ def run_translate(book_name: str) -> None:
         "output_tokens": output_tokens,
         "cost": cost,
         "cache_cleared": cache_cleared,
+        "chapter_limited": chapter_limited,
     }})
 
 

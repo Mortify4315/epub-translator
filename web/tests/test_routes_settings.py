@@ -111,3 +111,16 @@ def test_settings_concurrency_clamped_at_max(client, sandbox):
     resp = client.post("/api/settings", json={"concurrency": 999})
     assert resp.status_code == 200
     assert resp.get_json()["concurrency"] == 64
+
+
+def test_settings_chapter_limit_roundtrip(client, sandbox):
+    resp = client.post("/api/settings", json={"chapter_limit": 400})
+    assert resp.status_code == 200
+    assert resp.get_json()["chapter_limit"] == 400
+    # negative clamps to 0 (unlimited), like the concurrency clamp
+    resp = client.post("/api/settings", json={"chapter_limit": -1})
+    assert resp.status_code == 200
+    assert resp.get_json()["chapter_limit"] == 0
+    resp = client.post("/api/settings", json={"chapter_limit": 0})
+    assert resp.status_code == 200
+    assert resp.get_json()["chapter_limit"] == 0

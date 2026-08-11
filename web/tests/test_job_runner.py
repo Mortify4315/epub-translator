@@ -59,6 +59,25 @@ def test_progress_callback_chapter_counting(monkeypatch):
     assert recorded[-1]["msg"] == "Chapter 13/13 done"
 
 
+def test_progress_callback_chapter_limit(monkeypatch):
+    # Batch mode: raising the limit stops the run with the partial epub kept.
+    recorded = []
+    monkeypatch.setattr(job_runner, "_emit", recorded.append)
+    on_progress, _ = job_runner.make_progress_callback(
+        estimate_total=13, headers=2, chapter_limit=3)
+    fractions = [0.05, 0.10] + [0.10 + k * 0.9 / 13 for k in range(1, 14)]
+    raised = None
+    for frac in fractions:
+        try:
+            on_progress(frac)
+        except job_runner.core.translate_book.ChapterLimitReached as err:
+            raised = err
+            break
+    assert raised is not None and raised.limit == 3
+    assert recorded[-1]["chapters_done"] == 3
+    assert recorded[-1]["msg"] == "Chapter 3/13 done"
+
+
 def test_emit_log_builds_log_event(monkeypatch):
     recorded = []
     monkeypatch.setattr(job_runner, "_emit", recorded.append)

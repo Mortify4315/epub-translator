@@ -373,6 +373,16 @@ def get_token_budget(source_name: str) -> int:
         return default
 
 
+def get_chapter_limit() -> int:
+    """Max chapters to translate per run; 0 = unlimited. Lets long books be
+    translated in batches: each run stops cleanly at the limit and the output
+    epub is finalized (readable) with the chapters done so far."""
+    try:
+        return max(0, int(load_settings().get("chapter_limit", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
 def get_max_retries() -> int:
     try:
         return int(load_settings().get("max_retries", MAX_RETRIES_DEFAULT))
