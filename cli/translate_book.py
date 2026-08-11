@@ -63,6 +63,15 @@ def prepare_epub(source_path: Path, work_dir: Path) -> Path:
 
 
 def estimate(source_path: Path) -> dict:
+    """Token/cost estimate, calibrated against real runs (2026-08-11).
+
+    Measured economics (live, deepseek-v4-flash via opencode-go):
+      - 5-chapter run (group 10000): 251,722 tok / 20,215 chars = 12.45 tok/char
+      - 13-chapter run (group 5000):  404,141 tok / 28,325 chars = 14.27 tok/char
+      - blended ≈ 13.5 tokens per source char (translate + fill passes combined)
+      - in/out split ≈ 46% / 54% of total tokens
+    The old chars*1.2 model understated real cost ~10x.
+    """
     book = epub.read_epub(source_path)
     chapters = 0
     total_chars = 0
@@ -74,8 +83,10 @@ def estimate(source_path: Path) -> dict:
         for tag in soup(["script", "style"]):
             tag.decompose()
         total_chars += len(soup.get_text())
-    tokens = int(total_chars * 1.2) + chapters * 50
-    cost = estimate_cost(tokens, int(tokens * 0.6))
+    tokens = int(total_chars * 13.5) + chapters * 50
+    input_tokens = int(tokens * 0.46)
+    output_tokens = int(tokens * 0.54)
+    cost = estimate_cost(input_tokens, output_tokens)
     return {"chapters": chapters, "chars": total_chars, "tokens": tokens, "cost": cost}
 
 

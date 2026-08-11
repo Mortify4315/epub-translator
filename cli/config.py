@@ -62,8 +62,8 @@ PROVIDER_PRESETS = {
             "glm-5.1", "glm-5.2", "qwen3.7-max", "qwen3.8-max", "mimo-v2.5-pro",
         ],
         "prices": {
-            "deepseek-v4-flash": (0.14, 0.28),
-            "deepseek-v4-pro": (0.435, 0.87),
+            "deepseek-v4-flash": (0.07, 0.14),
+            "deepseek-v4-pro": (0.43, 0.87),
             "mimo-v2.5": (0.14, 0.28),
             "mimo-v2.5-pro": (0.435, 0.87),
             "hy3": (0.14, 0.58),
@@ -81,7 +81,7 @@ PROVIDER_PRESETS = {
             "glm-5.1": (1.40, 4.40),
             "glm-5.2": (1.40, 4.40),
         },
-        "default_price": (0.14, 0.28),
+        "default_price": (0.07, 0.14),
     },
     "openai": {
         "label": "OpenAI",
