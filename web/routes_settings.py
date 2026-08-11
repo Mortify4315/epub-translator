@@ -1,4 +1,5 @@
 import json
+import os
 
 from flask import Blueprint, abort, jsonify, request
 
@@ -12,14 +13,25 @@ def settings_payload():
     if not key:
         key = str(core.config.load_settings().get("api_key", "")).strip()
     masked = (key[:6] + "…" + key[-4:]) if len(key) > 12 else "(not set)"
+    provider = core.config.get_provider()
+    info = core.config.get_provider_info(provider)
     return {
+        "provider": provider,
+        "providers": [
+            {"name": name, "label": info2["label"]}
+            for name, info2 in core.config.PROVIDER_PRESETS.items()
+        ],
+        "provider_label": info["label"],
+        "models": info["models"],
+        "thinking_supported": info["thinking"],
+        "env_key": info["env_key"],
         "api_key_set": bool(key),
         "api_key_masked": masked,
         "model": core.config.get_model(),
         "base_url": core.config.get_base_url(),
         "concurrency": core.config.get_concurrency(),
         "max_group_tokens": core.config.get_max_group_tokens(),
-        "thinking": core.config.get_extra_body()["thinking"]["type"],
+        "thinking": core.config.get_thinking(),
         "fill_thinking": core.config.get_fill_thinking(),
     }
 
@@ -32,16 +44,47 @@ def get_settings():
 @bp.post("/api/settings")
 def update_settings():
     data = request.get_json(force=True)
-    if "api_key" in data and str(data["api_key"]).strip():
-        core.config.set_api_key(str(data["api_key"]).strip())
     s = core.config.load_settings()
-    if data.get("model") in ("deepseek-v4-flash", "deepseek-v4-pro"):
-        s["model"] = data["model"]
+
+    if "provider" in data:
+        provider = str(data["provider"]).strip()
+        if provider not in core.config.PROVIDER_PRESETS:
+            abort(400, f"Unknown provider '{provider}'.")
+        if provider == "custom":
+            # The custom provider has no default base URL — refusing to save a
+            # state that would only fail at request time with an opaque error.
+            # (An env-var override is also a valid source.)
+            base = (str(data.get("base_url") or "").strip()
+                    or str(s.get("base_url") or "").strip()
+                    or os.environ.get("CUSTOM_LLM_BASE_URL", "").strip())
+            if not base:
+                abort(400, "provider 'custom' requires a base_url (any OpenAI-compatible endpoint).")
+        s["provider"] = provider
+
+    if "api_key" in data and str(data["api_key"]).strip():
+        # Write to the slot for the provider being saved (or the active one).
+        provider = str(data.get("provider") or s.get("provider") or "").strip()
+        core.config.set_api_key(str(data["api_key"]).strip(),
+                                provider if provider in core.config.PROVIDER_PRESETS else None)
+        s = core.config.load_settings()
+
+    if "model" in data:
+        model = str(data["model"]).strip()
+        if not model:
+            abort(400, "model must not be empty.")
+        s["model"] = model
+
+    if "base_url" in data:
+        base_url = str(data["base_url"]).strip()
+        if base_url and not base_url.startswith(("http://", "https://")):
+            abort(400, "base_url must start with http:// or https://.")
+        s["base_url"] = base_url
+
     if "concurrency" in data:
         try:
-            s["concurrency"] = max(1, min(16, int(data["concurrency"])))
+            s["concurrency"] = max(1, min(core.config.CONCURRENCY_MAX, int(data["concurrency"])))
         except (TypeError, ValueError):
-            abort(400, "concurrency must be an integer 1-16.")
+            abort(400, f"concurrency must be an integer 1-{core.config.CONCURRENCY_MAX}.")
     if "max_group_tokens" in data:
         try:
             s["max_group_tokens"] = int(data["max_group_tokens"])

@@ -9,7 +9,9 @@ scan for terms, run quality checks, and edit settings — no terminal menus.
 - Windows, Python 3.11, 3.12, or 3.13 installed and on PATH.
 - The sibling `epub-translator` project at `..\epub-translator` (its `books/`, `out/`,
   `cache/`, `glossaries/`, `settings.json` are the single source of truth for data).
-- A DeepSeek API key set in the sibling's `settings.json` or via the Settings tab.
+- An API key for any supported provider (DeepSeek, OpenCode Go, OpenAI, Anthropic,
+  Gemini, xAI, Groq, Mistral, OpenRouter, or custom), set in the sibling's
+  `settings.json` or via the Settings tab.
 
 ## How to run
 
@@ -28,8 +30,9 @@ folder before running.
 - **Scan Terms** — auto-find names/skills/terms in a book, review proposed English
   translations, and add the ones you want.
 - **Quality Check** — offline scan for terms translated inconsistently.
-- **Settings** — API key, model, concurrency, translate mode, fill mode.
-  Changing translate/fill mode clears the translation cache.
+- **Settings** — provider, API key, model, base URL override, concurrency,
+  translate mode, fill mode. Changing provider/model/base URL or translate/fill
+  mode clears the translation cache.
 
 ## Dev
 

@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 from ebooklib import epub
 from openai import OpenAI
 
-from config import get_api_key, get_base_url, get_extra_body, get_model
+from config import get_api_key, get_base_url, get_extra_body, get_model, get_provider, get_provider_info, validate_ready
 from glossary import GLOBAL_NAME, add_terms, book_key, merge_glossaries
 
 CJK = re.compile(r"^[\u4e00-\u9fff]+$")
@@ -110,10 +110,11 @@ def main():
     parser.add_argument("--scope", choices=["book", "global"], default="book")
     args = parser.parse_args()
 
-    api_key = get_api_key()
-    if not api_key:
-        print("No API key configured. Set DEEPSEEK_API_KEY or use the app Settings.")
+    problems = validate_ready()
+    if problems:
+        print("; ".join(problems))
         return
+    api_key = get_api_key()
 
     path = Path(args.epub)
     candidates = candidate_terms(path, min_count=args.min_count, max_terms=args.max_terms)

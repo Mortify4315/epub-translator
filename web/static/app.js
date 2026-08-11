@@ -72,11 +72,40 @@ function updateButtons() {
 }
 
 function renderSettings(s) {
+  const provSel = $("#setting-provider");
+  provSel.innerHTML = "";
+  for (const p of s.providers) {
+    const opt = el("option", "", p.label);
+    opt.value = p.name;
+    provSel.append(opt);
+  }
+  provSel.value = s.provider;
+  $("#setting-key-hint").textContent =
+    "Stored locally in settings.json. Env var override: " + s.env_key + ".";
+  const modelOpts = $("#model-options");
+  modelOpts.innerHTML = "";
+  for (const m of s.models) {
+    const opt = el("option", "", m);
+    opt.value = m;
+    modelOpts.append(opt);
+  }
   $("#setting-model").value = s.model;
+  $("#setting-base").value = s.base_url;
   $("#setting-concurrency").value = s.concurrency;
   $("#setting-thinking").value = s.thinking;
   $("#setting-fill").value = s.fill_thinking;
   $("#setting-key").placeholder = s.api_key_set ? "Current: " + s.api_key_masked : "(not set)";
+  const warn = $("#setting-thinking-warn");
+  if (s.thinking_supported) {
+    warn.classList.add("hidden");
+    $("#setting-thinking").disabled = false;
+    $("#setting-fill").disabled = false;
+  } else {
+    warn.textContent = "Thinking modes apply to DeepSeek-family providers only; ignored by " + s.provider_label + ".";
+    warn.classList.remove("hidden");
+    $("#setting-thinking").disabled = true;
+    $("#setting-fill").disabled = true;
+  }
 }
 
 async function refresh() {

@@ -10,7 +10,9 @@ import scan_glossary as scan_mod
 import translate_book as translate_mod
 from config import (
     BOOKS_DIR,
+    CONCURRENCY_MAX,
     OUT_DIR,
+    PROVIDER_PRESETS,
     get_api_key,
     get_base_url,
     get_concurrency,
@@ -18,6 +20,8 @@ from config import (
     get_fill_thinking,
     get_max_retries,
     get_model,
+    get_provider,
+    get_provider_info,
     get_token_budget,
     load_settings,
     save_settings,
@@ -89,7 +93,7 @@ def translate_flow() -> None:
     if not book:
         return
     if not get_api_key():
-        console.print("[yellow]Set your DeepSeek API key first (Settings).[/yellow]")
+        console.print("[yellow]Set your API key first (Settings).[/yellow]")
         return
     key = book_key(book.name)
     est = translate_mod.estimate(book)
@@ -238,10 +242,12 @@ def settings_flow() -> None:
     while True:
         key = get_api_key()
         masked = (key[:6] + "..." + key[-4:]) if len(key) > 12 else "(empty)"
-        thinking = "thinking on" if get_extra_body()["thinking"]["type"] == "enabled" else "fast (no thinking)"
+        info = get_provider_info()
+        thinking = get_extra_body().get("thinking", {}).get("type", "n/a")
         console.print(
             Panel(
                 "[bold]Settings[/bold]\n"
+                f"Provider: {get_provider()} ({info['label']})\n"
                 f"API key: {masked}\n"
                 f"Model: {get_model()}   API: {get_base_url()}\n"
                 f"Parallel requests: {get_concurrency()}   Mode: {thinking}\n"
@@ -252,8 +258,10 @@ def settings_flow() -> None:
         choice = questionary.select(
             "Actions",
             choices=[
+                "Change provider",
                 "Set / change API key",
                 "Change model",
+                "Change base URL",
                 "Change concurrency",
                 "Change mode (speed vs. quality)",
                 "Change fill mode (structure mapping)",
@@ -262,29 +270,63 @@ def settings_flow() -> None:
                 "Back",
             ],
         ).ask()
-        if choice == "Set / change API key":
+        if choice == "Change provider":
+            new_provider = questionary.select(
+                "Provider",
+                choices=[
+                    questionary.Choice(title=preset["label"], value=name)
+                    for name, preset in PROVIDER_PRESETS.items()
+                ],
+            ).ask()
+            if new_provider:
+                settings = load_settings()
+                settings["provider"] = new_provider
+                save_settings(settings)
+                console.print(f"[green]Provider switched to {new_provider}.[/green]")
+        elif choice == "Set / change API key":
+            info = get_provider_info()
             new_key = questionary.text(
-                "DeepSeek API key (from https://platform.deepseek.com/api_keys):"
+                f"{info['label']} API key (env var {info['env_key']} also works):"
             ).ask()
             if new_key:
                 set_api_key(new_key)
                 console.print("[green]API key saved.[/green]")
         elif choice == "Change model":
-            new_model = questionary.select(
-                "Model", choices=["deepseek-v4-flash", "deepseek-v4-pro"]
-            ).ask()
+            info = get_provider_info()
+            if info["models"]:
+                new_model = questionary.select(
+                    "Model", choices=list(info["models"])
+                ).ask()
+            else:
+                new_model = questionary.text(
+                    "Model name (any OpenAI-compatible model):", default=get_model()
+                ).ask()
             if new_model:
                 settings = load_settings()
-                settings["model"] = new_model
+                settings["model"] = str(new_model).strip()
+                save_settings(settings)
+                console.print(f"[green]Model set to {settings['model']}.[/green]")
+        elif choice == "Change base URL":
+            new_url = questionary.text(
+                "API base URL (blank = provider default):",
+                default=get_base_url(),
+            ).ask()
+            if new_url is not None:
+                settings = load_settings()
+                settings["base_url"] = new_url.strip()
                 save_settings(settings)
         elif choice == "Change concurrency":
             new_value = questionary.text(
-                "Parallel requests (1-16, default 8):", default=str(get_concurrency())
+                f"Parallel requests (1-{CONCURRENCY_MAX}, default 8):",
+                default=str(get_concurrency()),
             ).ask()
-            if new_value and new_value.isdigit():
+            if new_value and new_value.isdigit() and 1 <= int(new_value) <= CONCURRENCY_MAX:
                 settings = load_settings()
                 settings["concurrency"] = int(new_value)
                 save_settings(settings)
+                console.print("[green]Concurrency saved.[/green]")
+            elif new_value:
+                console.print(f"[yellow]Concurrency must be 1-{CONCURRENCY_MAX}.[/yellow]")
         elif choice == "Change mode (speed vs. quality)":
             new_mode = questionary.select(
                 "Mode",
@@ -317,15 +359,21 @@ def settings_flow() -> None:
                     "the next translate re-does the full book.[/yellow]"
                 )
         elif choice == "Change token budget":
+            settings = load_settings()
             new_value = questionary.text(
-                "Token budget for normal books (default 1500000; Test_ books auto-use 300000):",
+                "Token budget for normal books (default 1500000):",
                 default=str(get_token_budget("book.epub")),
             ).ask()
             if new_value and new_value.isdigit():
-                settings = load_settings()
                 settings["token_budget"] = int(new_value)
-                save_settings(settings)
-                console.print("[green]Token budget saved.[/green]")
+            test_value = questionary.text(
+                "Token budget for test books (Test_ prefix or _test suffix, default 500000):",
+                default=str(get_token_budget("Test_.epub")),
+            ).ask()
+            if test_value and test_value.isdigit():
+                settings["token_budget_test"] = int(test_value)
+            save_settings(settings)
+            console.print("[green]Token budgets saved.[/green]")
         elif choice == "Change retries (fill + API)":
             new_value = questionary.text(
                 "Retries per request (default 2, applies to both fill + API):",
@@ -380,11 +428,13 @@ def main_menu() -> None:
 def main() -> None:
     console.clear()
     if not get_api_key():
+        info = get_provider_info()
         console.print(
-            "[yellow]Welcome! Before translating, set your DeepSeek API key "
-            "(get one at https://platform.deepseek.com/api_keys).[/yellow]"
+            f"[yellow]Welcome! Before translating, set your API key for "
+            f"{info['label']} (provider '{get_provider()}', env var "
+            f"{info['env_key']}).[/yellow]"
         )
-        new_key = questionary.text("DeepSeek API key:").ask()
+        new_key = questionary.text(f"{info['label']} API key:").ask()
         if new_key:
             set_api_key(new_key)
             console.print("[green]API key saved.[/green]")

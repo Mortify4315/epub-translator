@@ -108,19 +108,21 @@
       <section id="view-settings" class="view hidden">
         <div class="card">
           <div class="card-title">Settings</div>
-          <label for="setting-key">DeepSeek API key</label>
+          <label for="setting-provider">Provider</label>
+          <select id="setting-provider"></select>
+          <label for="setting-key">API key</label>
           <div class="row">
             <input id="setting-key" type="password" placeholder="(unchanged)">
             <button id="save-key" class="btn primary">Save key</button>
           </div>
-          <p class="hint">Get one at platform.deepseek.com/api_keys. Stored locally in settings.json.</p>
+          <p class="hint" id="setting-key-hint"></p>
           <label for="setting-model">Model</label>
-          <select id="setting-model">
-            <option value="deepseek-v4-flash">deepseek-v4-flash</option>
-            <option value="deepseek-v4-pro">deepseek-v4-pro</option>
-          </select>
-          <label for="setting-concurrency">Parallel requests (1–16)</label>
-          <input id="setting-concurrency" type="number" min="1" max="16">
+          <input id="setting-model" list="model-options" placeholder="type any model name">
+          <datalist id="model-options"></datalist>
+          <label for="setting-base">API base URL (optional override)</label>
+          <input id="setting-base" type="text" placeholder="auto from provider">
+          <label for="setting-concurrency">Parallel requests (1–64)</label>
+          <input id="setting-concurrency" type="number" min="1" max="64">
           <label for="setting-thinking">Translate mode</label>
           <select id="setting-thinking">
             <option value="disabled">Fast (no thinking) — recommended</option>
@@ -132,7 +134,8 @@
             <option value="enabled">Thinking on — most accurate</option>
             <option value="disabled">No thinking — fastest</option>
           </select>
-          <p class="warn">Changing translate/fill mode clears the book's translation cache.</p>
+          <p class="warn hidden" id="setting-thinking-warn"></p>
+          <p class="warn">Changing provider/model/base URL or translate/fill mode clears the book's translation cache.</p>
           <button id="save-settings" class="btn primary">Save settings</button>
         </div>
       </section>

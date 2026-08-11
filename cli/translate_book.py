@@ -22,8 +22,11 @@ from config import (
     get_max_group_tokens,
     get_max_retries,
     get_model,
+    get_provider,
+    get_provider_info,
     get_retry_times,
     get_token_budget,
+    validate_ready,
 )
 from glossary import book_key, build_translation_prompt, merge_glossaries
 
@@ -78,7 +81,9 @@ def estimate(source_path: Path) -> dict:
 
 def _cache_config() -> dict:
     return {
-        "thinking": get_extra_body()["thinking"]["type"],
+        "provider": get_provider(),
+        "base_url": get_base_url(),
+        "thinking": get_extra_body().get("thinking", {}).get("type", "none"),
         "fill_thinking": get_fill_thinking(),
         "model": get_model(),
         "max_group_tokens": get_max_group_tokens(),
@@ -95,9 +100,10 @@ def _ensure_cache_matches_config(cache_path: Path, config: dict) -> bool:
 
 
 def run_translation(source_path: Path, on_progress=None) -> dict:
+    problems = validate_ready()
+    if problems:
+        raise RuntimeError("; ".join(problems))
     api_key = get_api_key()
-    if not api_key:
-        raise RuntimeError("No API key configured. Set it in Settings or DEEPSEEK_API_KEY.")
     key = book_key(source_path.name)
     glossary = merge_glossaries(key)
     prompt = build_translation_prompt(glossary)
@@ -186,7 +192,7 @@ def main():
         return
     print()
     if result.get("cache_cleared"):
-        print("Note: translation cache was cleared (thinking/fill mode changed).")
+        print("Note: translation cache was cleared (provider/base URL/model or mode changed).")
     print(f"Saved to {result['target']}")
     print(f"Tokens: {result['input_tokens']:,} in / {result['output_tokens']:,} out   "
           f"Est. cost: ${result['cost']:.2f}")

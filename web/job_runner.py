@@ -68,9 +68,10 @@ def start_heartbeat(elapsed_since_last):
 
 
 def run_translate(book_name: str) -> None:
+    problems = core.config.validate_ready()
+    if problems:
+        raise RuntimeError("; ".join(problems))
     api_key = core.config.get_api_key()
-    if not api_key:
-        raise RuntimeError("No API key configured. Set it in Settings.")
     key = core.glossary.book_key(book_name)
     glossary = core.glossary.merge_glossaries(key)
     prompt = core.glossary.build_translation_prompt(glossary)
@@ -87,7 +88,9 @@ def run_translate(book_name: str) -> None:
     budget = core.config.get_token_budget(book_name)
 
     config = {
-        "thinking": core.config.get_extra_body()["thinking"]["type"],
+        "provider": core.config.get_provider(),
+        "base_url": core.config.get_base_url(),
+        "thinking": core.config.get_extra_body().get("thinking", {}).get("type", "none"),
         "fill_thinking": core.config.get_fill_thinking(),
         "model": core.config.get_model(),
         "max_group_tokens": core.config.get_max_group_tokens(),
@@ -103,7 +106,7 @@ def run_translate(book_name: str) -> None:
         if saved != config:
             shutil.rmtree(cache_path, ignore_errors=True)
             cache_cleared = True
-            emit_log("warn", "Translation cache cleared (thinking/fill/model/grouping changed).")
+            emit_log("warn", "Translation cache cleared (provider/base URL/model or mode changed).")
     cache_path.mkdir(parents=True, exist_ok=True)
     (cache_path / "config.json").write_text(
         json.dumps(config, ensure_ascii=False, sort_keys=True), encoding="utf-8")
@@ -178,9 +181,10 @@ def run_translate(book_name: str) -> None:
 
 
 def run_scan(book_name: str) -> None:
+    problems = core.config.validate_ready()
+    if problems:
+        raise RuntimeError("; ".join(problems))
     api_key = core.config.get_api_key()
-    if not api_key:
-        raise RuntimeError("No API key configured. Set it in Settings.")
     source_path = core.config.BOOKS_DIR / book_name
     if not source_path.is_file():
         raise RuntimeError(f"Book not found: {book_name}")
