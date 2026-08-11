@@ -76,6 +76,11 @@ class Job:
 
 def default_spawn(kind: str, book_name: str):
     script = Path(__file__).resolve().parent / "job_runner.py"
+    kwargs = {}
+    if sys.platform == "win32":
+        # Never pop a console window for the child, even when the server
+        # itself runs hidden (pythonw / detached).
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     proc = subprocess.Popen(
         [sys.executable, str(script), kind, book_name],
         stdout=subprocess.PIPE,
@@ -83,6 +88,7 @@ def default_spawn(kind: str, book_name: str):
         text=True,
         encoding="utf-8",
         bufsize=1,
+        **kwargs,
     )
     return proc, proc.stdout
 
