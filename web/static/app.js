@@ -168,7 +168,90 @@ async function bootstrap() {
     if (typeof initScan === "function") initScan();
     if (typeof initQa === "function") initQa();
     if (typeof initSettings === "function") initSettings();
+    pickupCurrentJob();
   } catch (e) { toast(e.message, "error"); }
+}
+
+/* Adopt a job that was started elsewhere (another tab, or launched via the
+   API) so a freshly opened page shows live progress instead of nothing. */
+async function pickupCurrentJob() {
+  let job;
+  try { job = await api("/api/jobs/current"); }
+  catch (e) { return; } // 404 = no job yet
+  if (!job || !["running", "stopped"].includes(job.status)) return;
+  const adopt = (sel) => {
+    $(sel).classList.remove("hidden");
+  };
+  if (job.kind === "translate") {
+    _currentJobId = job.id;
+    adopt("#translate-job");
+    adopt("#translate-log");
+    adopt("#stop-translate");
+    $("#start-translate").disabled = true;
+    if (job.status === "stopped") {
+      $("#start-translate").disabled = false;
+      $("#stop-translate").classList.add("hidden");
+      $("#translate-heartbeat").textContent = "Stopped — re-run resumes from cache.";
+      $("#translate-heartbeat").classList.remove("hidden");
+      fetchLogOnce(job.id, "#translate-log");
+      return;
+    }
+    pollJob(job.id, {
+      barSel: "#translate-bar",
+      msgSel: "#translate-msg",
+      onTick: updateTranslateTick,
+      onLog: (entries) => appendLog("#translate-log", entries),
+      onDone: finishTranslate,
+      onError: (j) => {
+        $("#start-translate").disabled = false;
+        $("#stop-translate").classList.add("hidden");
+        toast("Translation failed: " + j.error, "error");
+      },
+      onStopped: () => {
+        $("#start-translate").disabled = false;
+        $("#stop-translate").classList.add("hidden");
+        $("#translate-heartbeat").textContent = "Stopped — re-run resumes from cache.";
+        $("#translate-heartbeat").classList.remove("hidden");
+      },
+    });
+  } else if (job.kind === "scan") {
+    _scanJobId = job.id;
+    adopt("#scan-progress");
+    adopt("#scan-log");
+    adopt("#stop-scan");
+    $("#start-scan").disabled = true;
+    if (job.status === "stopped") {
+      $("#start-scan").disabled = false;
+      $("#stop-scan").classList.add("hidden");
+      toast("Scan stopped", "info");
+      fetchLogOnce(job.id, "#scan-log");
+      return;
+    }
+    pollJob(job.id, {
+      barSel: "#scan-bar",
+      msgSel: "#scan-msg",
+      onTick: () => {},
+      onLog: (entries) => appendLog("#scan-log", entries),
+      onDone: renderScanResult,
+      onError: (j) => {
+        $("#start-scan").disabled = false;
+        $("#stop-scan").classList.add("hidden");
+        toast("Scan failed: " + j.error, "error");
+      },
+      onStopped: () => {
+        $("#start-scan").disabled = false;
+        $("#stop-scan").classList.add("hidden");
+        toast("Scan stopped", "info");
+      },
+    });
+  }
+}
+
+async function fetchLogOnce(jobId, sel) {
+  try {
+    const lg = await api("/api/jobs/" + jobId + "/log?after=0");
+    appendLog(sel, lg.entries);
+  } catch (e) { /* ignore */ }
 }
 
 document.addEventListener("DOMContentLoaded", bootstrap);

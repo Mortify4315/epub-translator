@@ -125,6 +125,10 @@ class JobManager:
                 return self._current
         return None
 
+    def get_current(self):
+        with self._lock:
+            return self._current
+
     def busy(self):
         with self._lock:
             return self._current is not None and self._current.status == "running"

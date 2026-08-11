@@ -42,6 +42,17 @@ def start_scan():
     return jsonify(job.to_dict())
 
 
+@bp.get("/api/jobs/current")
+def current_job():
+    """The most recent job (running or finished) — lets a freshly opened UI
+    page pick up a job that was started elsewhere (e.g. from another tab or
+    launched via the API)."""
+    job = jobs.manager.get_current()
+    if not job:
+        abort(404, "No job yet.")
+    return jsonify(job.to_dict())
+
+
 @bp.get("/api/jobs/<job_id>")
 def get_job(job_id):
     job = jobs.manager.get(job_id)

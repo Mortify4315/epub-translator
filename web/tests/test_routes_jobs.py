@@ -126,6 +126,25 @@ def test_stop_unknown_404(client):
     assert client.post("/api/jobs/ffffff/stop").status_code == 404
 
 
+def test_current_job_endpoint(client, sandbox, monkeypatch):
+    # A fresh page must be able to adopt a job started elsewhere.
+    jobs.manager._current = None  # reset shared manager state (tests share it)
+    (sandbox["books"] / "book.epub").write_bytes(b"x")
+    monkeypatch.setattr(core_loader.config, "get_api_key", lambda: "sk-test")
+    patch_spawn(monkeypatch, blocked_lines)
+    assert client.get("/api/jobs/current").status_code == 404
+    resp = client.post("/api/translate", json={"book": "book.epub"})
+    job_id = resp.get_json()["id"]
+    cur = client.get("/api/jobs/current")
+    assert cur.status_code == 200
+    data = cur.get_json()
+    assert data["id"] == job_id
+    assert data["status"] == "running"
+    assert data["kind"] == "translate"
+    # leave no busy job behind for other tests
+    client.post(f"/api/jobs/{job_id}/stop")
+
+
 def test_log_endpoint_incremental(client, sandbox, monkeypatch):
     (sandbox["books"] / "book.epub").write_bytes(b"x")
     monkeypatch.setattr(core_loader.config, "get_api_key", lambda: "sk-test")
