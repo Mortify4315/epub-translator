@@ -47,3 +47,15 @@ The app speaks the OpenAI chat-completions wire format, so any OpenAI-compatible
 - **Fast mode (default):** thinking is disabled, so each request is a single fast pass with no reasoning tokens. Use **Settings → Change mode** to turn thinking on if you prefer maximum accuracy over speed.
 - DeepSeek may charge 2x during peak hours (9:00–12:00 and 14:00–18:00 Beijing time).
 - `epub-translator` requires Python 3.11–3.13; the launcher will warn you if your Python is incompatible.
+
+## Batch translation (long books)
+
+Set `chapter_limit` in `settings.json` (or via the web UI's settings API) to
+stop the run cleanly after N spine items (~N-6 real chapters; the offset is
+the cover/front/intro/volume pages). The run finalizes a readable partial
+epub and keeps it (unlike `BudgetExceeded`, which deletes the output). Re-run
+with a higher limit to continue — finished chapters are served from the
+per-request cache and are not re-billed.
+
+Post-processing of the partial epub (merge with the full source, optional
+trim to English-only chapters) is documented in `tools/README.md`.
