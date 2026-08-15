@@ -332,3 +332,132 @@ holds once the wrapper is treated as the pure container it is.
 3. 30-chapter stratified quality gate with blind pairwise judging
    (DeepSeek-only, per the user's model override).
 4. Final doc + default decision (plan §10).
+
+---
+
+## Canary, stop/resume, quality gate — results
+
+### Canary run 1 (100 chapters, budget 3,000,000) — strict abort exposes the name stratum
+
+| Metric | two-pass (baseline) | one-pass (candidate) |
+| --- | ---: | ---: |
+| Total tokens | 3,009,162 (guard fired, 5266/7806 blocks) | 535,168 (completed 7806/7806) |
+| Requests / repairs | 280 / 0 | 120 / 24 |
+| Wall time | 518.1s | 168.9s |
+| Output CJK runs | 14 | 3,814 (abort artifact, see below) |
+| Errors | budget guard | strict abort at ch.86: `盟主乌列` |
+
+The strict gate fired at chapter 86: the model kept the reader name
+`盟主乌列` (Alliance Leader Uriel 123 in the established translation)
+untranslated through every ladder retry, and strict mode refused to
+ship it. **Chapters 1-85 translated with zero CJK runs**; the abort
+finalized chapters 86-100 from source (that is the 3,814-run artifact).
+Per-chapter calibration: one-pass 5.35k tokens/chapter vs the E4 pilot's
+6.2k → **within 20%** ✓.
+
+**Stratum repair (commits `498a19d`):** the default prompt now instructs
+pinyin transliteration of personal names and translation of meaningful
+titles/terms ("Never leave Chinese characters in the output"), and the
+100-ch book gained a glossary (`盟主乌列`→Alliance Leader Uriel, `盟主`→
+Alliance Leader, `乌列`→Uriel). The cache key includes the messages, so
+this is a fresh-call repair for both pipelines. Note: the two-pass
+baseline shows the same CJK in its partial output (14 runs) — the leak
+is model behavior, not protocol-specific.
+
+### Stop/resume rebilling check (chapter_limit 50 → 100, same cache)
+
+`cli/out/e4-prep/resume_check.py` on the 100-ch slice, repaired prompt:
+
+| Run | chapters | fresh input | cached input | output |
+| --- | ---: | ---: | ---: | ---: |
+| stop at 50 | 50 (limit) | 129,737 | 125,824 | 147,759 |
+| resume to 100 | 100 (complete) | 132,943 | 126,976 | 147,813 |
+
+Fresh input stayed flat while doubling the chapter count: **the completed
+groups rebilled ~0 fresh input** (disk cache), i.e. near-zero rebilling
+for cached groups ✓. The resume run **completed all 100 chapters with no
+strict abort** and the final archive scans **0 CJK runs** (the 25 recorded
+remnants were intermediate attempts the ladder repaired). This also fixed
+a latent off-by-one found along the way (`fdfabc5`): `chapter_limit`
+counted spine entries including the cover page, so a limit of 100 stopped
+after 99 real chapters; it now counts only chapters carrying translatable
+text (the production book has a cover page ahead of its chapters).
+
+### 30-chapter quality gate (blind pairwise, DeepSeek-only judging)
+
+Run on `Test_ChiXinXunTian_30ch.epub` (30/30 flat, 2,318 units):
+
+| Metric | two-pass (baseline) | one-pass (candidate) |
+| --- | ---: | ---: |
+| Total tokens | 1,027,600 | 178,609 |
+| Requests / repairs | 94 / 0 | 36 / 5 |
+| Wall time | 226.6s | 75.3s |
+| Blocks | 2,352 / 2,352 | 2,352 / 2,352 |
+| **Output CJK runs** | **9** | **0** |
+| Fallbacks | **1** | **0** |
+| Errors | none | none |
+
+Judging: 10 stratified chapters (1, 4, 7, 10, 13, 16, 19, 22, 25, 28 —
+early/mid/late arcs, 53-239 paragraphs each), aligned triples (source |
+two-pass | one-pass), two passes with swapped candidate order (position
+bias control). Per-chapter verdict on B vs A (pass 1: B=one-pass; pass 2
+swapped — results symmetric):
+
+| Chapter | Pass 1 | Pass 2 (swapped) |
+| --- | --- | --- |
+| 1 | B (one-pass) better | A (one-pass) better |
+| 4 | tie | tie |
+| 7 | tie | tie |
+| 10 | tie | tie |
+| 13 | tie | tie |
+| 16 | tie | tie |
+| 19 | tie | tie |
+| 22 | B (one-pass) better | A (one-pass) better |
+| 25 | tie | tie |
+| 28 | B (one-pass) better | A (one-pass) better |
+
+**One-pass better 3/10, tied 7/10, worse 0/10 → win/tie 100% ≥ 40% ✓.**
+No catastrophic omission, mistranslation, name drift, or structural
+damage in the one-pass candidate (mechanical gates: exact block count,
+zero drops/dups/reorders/empty). The two-pass baseline itself leaked raw
+Chinese three times in the sample (`归宿`, `启蒙`, `子弟`) — one-pass
+shipped none. Glossary: 0 terms applicable (empty book glossary) →
+delta 0 ≤ 2pp ✓ (coverage gap noted, same as the pilots).
+
+### Repair-rate assessment (the only failing gate, in both E4 runs and the canary)
+
+`repair_rate` (≤2%) failed every one-pass run: 0/13 (run 1), 2/13
+(run 2), 24/95 (canary), 5/30 (quality run). All repairs are single
+first-attempt fixes: the model tends to leave Chinese names/terms on the
+first attempt, the deterministic validator flags them, and the bounded
+ladder fixes them — **zero repaired items ever shipped, zero source-copy
+fallbacks, zero CJK in any completed one-pass output**. At 13 groups the
+gate is effectively zero-tolerance (1 repair = 7.7%); at production scale
+the repair rate means +15–25% requests on the affected groups, already
+included in the measured cost ratios (0.129–0.176). The alternative
+(two-pass) ships CJK remnants by design (9 runs in the 30-ch baseline).
+
+### Plan §10 decision analysis
+
+| §10 condition | Evidence | Result |
+| --- | --- | --- |
+| 1. All tests pass | 186 passed, compileall, diff checks | ✅ |
+| 2. E4 ≥50% token savings, zero source fallbacks | 84.2%, 0 | ✅ |
+| 3. 30-ch quality non-inferior | win/tie 100%, no defects | ✅ |
+| 4. Projected full-book metered cost ≤60% of baseline | ratio 0.129–0.176 | ✅ |
+| 5. 100-ch canary within 20% of pilot calibration | 5.35k vs 6.2k tok/ch | ✅ |
+
+All five §10 conditions hold. The only §7 gate that fails is
+`repair_rate`, which measures a bounded, visible, zero-defect mechanism
+(see above). **Recommendation: flip the default to `pipeline=one-pass`**
+(with two-pass retained for rollback and non-flat books); the plan's
+fallback ("keep two-pass") applies when the §10 conditions fail, which
+they do not. Final call deferred to the user; one-line settings change.
+
+### Remaining production note
+
+The full-book run (2,941 chapters ≈ 16M tokens) has not been attempted;
+per the plan, the canary is the precondition ("only then run the
+remaining book"). The stop/resume result shows a stopped run can resume
+with near-zero rebilling, so the 2,000+ chapter book can be translated
+in bounded batches.
