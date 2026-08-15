@@ -5,7 +5,7 @@ the job log. If the sibling run_translation gains new knobs, update this file
 to match (the cli/ subfolder is treated as read-only input).
 """
 import json
-import shutil
+
 import sys
 import threading
 from pathlib import Path
@@ -59,11 +59,12 @@ def run_translate(book_name: str) -> None:
     key = core.glossary.book_key(book_name)
     glossary = core.glossary.merge_glossaries(key)
     prompt = core.glossary.build_translation_prompt(glossary)
+    pipeline = core.config.get_pipeline()
     source_path = core.config.BOOKS_DIR / book_name
     if not source_path.is_file():
         raise RuntimeError(f"Book not found: {book_name}")
     target_path = core.config.OUT_DIR / f"{source_path.stem}.en.epub"
-    cache_path = core.config.CACHE_DIR / key
+
 
     emit_log("info", f"Translating {book_name}…")
     emit_log("info", f"Glossary: {len(glossary)} term(s)")
@@ -71,29 +72,10 @@ def run_translate(book_name: str) -> None:
         source_path, core.config.CACHE_DIR / "prep")
     budget = core.config.get_token_budget(book_name)
 
-    config = {
-        "provider": core.config.get_provider(),
-        "base_url": core.config.get_base_url(),
-        "thinking": core.config.get_extra_body().get("thinking", {}).get("type", "none"),
-        "fill_thinking": core.config.get_fill_thinking(),
-        "model": core.config.get_model(),
-        "max_group_tokens": core.config.get_max_group_tokens(),
-    }
-    cache_cleared = False
-    if cache_path.exists():
-        marker = cache_path / "config.json"
-        saved = None
-        try:
-            saved = json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            saved = None
-        if saved != config:
-            shutil.rmtree(cache_path, ignore_errors=True)
-            cache_cleared = True
-            emit_log("warn", "Translation cache cleared (provider/base URL/model or mode changed).")
-    cache_path.mkdir(parents=True, exist_ok=True)
-    (cache_path / "config.json").write_text(
-        json.dumps(config, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    cache_path, cache_cleared = core.translate_book.prepare_pipeline_cache(
+        key, pipeline, prompt, cache_dir=core.config.CACHE_DIR, settings=core.config)
+    if cache_cleared:
+        emit_log("warn", f"{pipeline} translation cache cleared; the sibling pipeline cache is preserved.")
 
     def make_llm(extra_body):
         return core.translate_book.LLM(
@@ -109,7 +91,7 @@ def run_translate(book_name: str) -> None:
         )
 
     translation_llm = make_llm(core.config.get_extra_body())
-    fill_llm = make_llm(core.config.get_fill_extra_body())
+    fill_llm = make_llm(core.config.get_fill_extra_body()) if pipeline == "two-pass" else None
 
     est = core.translate_book.estimate(source_path)
     headers = count_headers(source_for_translation)
@@ -123,29 +105,54 @@ def run_translate(book_name: str) -> None:
         level = "warn" if not event.over_maximum_retries else "error"
         emit_log(level, f"Fill fallback (retried {event.retried_count}x): {event.error_message}")
 
+    def on_protocol_failed(event):
+        if isinstance(event, dict):
+            detail = event.get("message") or event.get("error") or json.dumps(event, ensure_ascii=False)
+        else:
+            detail = (getattr(event, "message", None)
+                      or getattr(event, "error_message", None)
+                      or str(event))
+        emit_log("warn", f"One-pass protocol fallback: {detail}")
+
     def budget_aware_progress(frac: float) -> None:
-        used = translation_llm.total_tokens + fill_llm.total_tokens
+        used = translation_llm.total_tokens + (fill_llm.total_tokens if fill_llm else 0)
         if used > budget:
             raise core.translate_book.BudgetExceeded(budget, used)
         on_progress(frac)
 
-    emit_log("info", f"Translating {chapters_total} chapters (model {core.config.get_model()})…")
+    experimental = "; estimate is experimental" if pipeline == "one-pass" else ""
+    emit_log("info", f"Translating {chapters_total} chapters via {pipeline} (model {core.config.get_model()}){experimental}…")
     chapter_limited = False
     try:
-        core.translate_book.translate(
-            source_path=str(source_for_translation),
-            target_path=str(target_path),
-            target_language=core.translate_book.language.ENGLISH,
-            submit=core.translate_book.SubmitKind.REPLACE,
-            user_prompt=prompt,
-            max_retries=core.config.get_max_retries(),
-            translation_llm=translation_llm,
-            fill_llm=fill_llm,
-            concurrency=core.config.get_concurrency(),
-            max_group_tokens=core.config.get_max_group_tokens(),
-            on_progress=budget_aware_progress,
-            on_fill_failed=on_fill_failed,
-        )
+        if pipeline == "one-pass":
+            core.translate_book.load_one_pass_translator()(
+                source_path=str(source_for_translation),
+                target_path=str(target_path),
+                target_language=core.translate_book.language.ENGLISH,
+                user_prompt=prompt,
+                translation_llm=translation_llm,
+                max_group_tokens=core.config.get_max_group_tokens(),
+                max_retries=core.config.get_max_retries(),
+                strict=core.config.get_strict_one_pass(),
+                chapter_limit=chapter_limit,
+                on_progress=on_progress,
+                on_protocol_failed=on_protocol_failed,
+            )
+        else:
+            core.translate_book.translate(
+                source_path=str(source_for_translation),
+                target_path=str(target_path),
+                target_language=core.translate_book.language.ENGLISH,
+                submit=core.translate_book.SubmitKind.REPLACE,
+                user_prompt=prompt,
+                max_retries=core.config.get_max_retries(),
+                translation_llm=translation_llm,
+                fill_llm=fill_llm,
+                concurrency=core.config.get_concurrency(),
+                max_group_tokens=core.config.get_max_group_tokens(),
+                on_progress=budget_aware_progress,
+                on_fill_failed=on_fill_failed,
+            )
     except core.translate_book.BudgetExceeded as err:
         target_path.unlink(missing_ok=True)
         emit_log("error", f"Budget exceeded: used {err.used} of {err.budget} tokens — stopped. "
@@ -158,17 +165,23 @@ def run_translate(book_name: str) -> None:
                           f"re-run to continue from cache.")
     stop_heartbeat.set()
 
-    input_tokens = translation_llm.input_tokens + fill_llm.input_tokens
-    output_tokens = translation_llm.output_tokens + fill_llm.output_tokens
-    cost = core.config.estimate_cost(input_tokens, output_tokens)
+    input_tokens = translation_llm.input_tokens + (fill_llm.input_tokens if fill_llm else 0)
+    output_tokens = translation_llm.output_tokens + (fill_llm.output_tokens if fill_llm else 0)
+    cached_input_tokens = (getattr(translation_llm, "input_cache_tokens", 0)
+                           + (getattr(fill_llm, "input_cache_tokens", 0) if fill_llm else 0))
+    cost = core.config.estimate_cost(input_tokens, output_tokens,
+                                     cached_input_tokens=cached_input_tokens)
     emit_log("info", f"Done — {input_tokens:,} in / {output_tokens:,} out, est. cost ${cost:.2f}")
     _emit({"type": "result", "result": {
         "target": target_path.name,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "cached_input_tokens": cached_input_tokens,
         "cost": cost,
         "cache_cleared": cache_cleared,
         "chapter_limited": chapter_limited,
+        "pipeline": pipeline,
+        "cost_experimental": pipeline == "one-pass",
     }})
 
 

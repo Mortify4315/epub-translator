@@ -18,6 +18,8 @@ TOKEN_BUDGET_DEFAULT = 1_500_000
 TOKEN_BUDGET_TEST_DEFAULT = 500_000
 MAX_RETRIES_DEFAULT = 2
 RETRY_TIMES_DEFAULT = 2
+PIPELINE_DEFAULT = "two-pass"
+PIPELINES = ("two-pass", "one-pass")
 
 DEFAULT_PROVIDER = "deepseek"
 
@@ -62,7 +64,7 @@ PROVIDER_PRESETS = {
             "glm-5.1", "glm-5.2", "qwen3.7-max", "qwen3.8-max", "mimo-v2.5-pro",
         ],
         "prices": {
-            "deepseek-v4-flash": (0.07, 0.14),
+            "deepseek-v4-flash": (0.14, 0.28),
             "deepseek-v4-pro": (0.43, 0.87),
             "mimo-v2.5": (0.14, 0.28),
             "mimo-v2.5-pro": (0.435, 0.87),
@@ -81,7 +83,10 @@ PROVIDER_PRESETS = {
             "glm-5.1": (1.40, 4.40),
             "glm-5.2": (1.40, 4.40),
         },
-        "default_price": (0.07, 0.14),
+        "default_price": (0.14, 0.28),
+        # OpenCode Go bills prompt-cache reads separately from fresh input.
+        # Unlisted models deliberately fall back to their fresh input price.
+        "cached_input_prices": {"deepseek-v4-flash": 0.0028},
     },
     "openai": {
         "label": "OpenAI",
@@ -383,6 +388,19 @@ def get_chapter_limit() -> int:
         return 0
 
 
+def get_pipeline() -> str:
+    """Selected translation implementation. Invalid persisted values safely
+    fall back to the compatible two-pass engine without rewriting settings."""
+    pipeline = str(load_settings().get("pipeline", PIPELINE_DEFAULT)).strip().lower()
+    return pipeline if pipeline in PIPELINES else PIPELINE_DEFAULT
+
+
+def get_strict_one_pass() -> bool:
+    """Only a JSON boolean enables one-pass protocol aborts; values such as
+    the string ``\"true\"`` are legacy/invalid data and remain non-strict."""
+    return load_settings().get("strict_one_pass", False) is True
+
+
 def get_max_retries() -> int:
     try:
         return int(load_settings().get("max_retries", MAX_RETRIES_DEFAULT))
@@ -403,7 +421,24 @@ def get_prices() -> tuple[float, float]:
     return info["prices"].get(model, info["default_price"])
 
 
-def estimate_cost(input_tokens: int, output_tokens: int) -> float:
+def get_cached_input_price() -> float:
+    """Per-million-token cached-input price for the active model. Providers
+    without a published cache-read rate use fresh-input pricing conservatively."""
+    info = get_provider_info()
+    fresh_input_per_m, _output_per_m = get_prices()
+    return info.get("cached_input_prices", {}).get(get_model(), fresh_input_per_m)
+
+
+def estimate_cost(input_tokens: int, output_tokens: int, *, cached_input_tokens: int = 0) -> float:
+    """Metered estimate with optional cached-input accounting.
+
+    The two positional input/output API remains compatible with existing
+    callers. Callers that can observe prompt-cache reads may pass the subset
+    in ``cached_input_tokens``; it is clamped to total input defensively.
+    """
     input_per_m, output_per_m = get_prices()
-    return (input_tokens / 1_000_000 * input_per_m
+    cached_input_tokens = max(0, min(int(cached_input_tokens), int(input_tokens)))
+    fresh_input_tokens = input_tokens - cached_input_tokens
+    return (fresh_input_tokens / 1_000_000 * input_per_m
+            + cached_input_tokens / 1_000_000 * get_cached_input_price()
             + output_tokens / 1_000_000 * output_per_m)

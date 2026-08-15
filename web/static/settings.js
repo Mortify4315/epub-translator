@@ -1,6 +1,13 @@
 function initSettings() {
   $("#save-key").addEventListener("click", saveKey);
   $("#save-settings").addEventListener("click", saveSettings);
+  syncOnePassControls(STATE.settings);
+}
+
+function syncOnePassControls(s) {
+  if (!s) return;
+  $("#setting-pipeline").value = s.pipeline || "two-pass";
+  $("#setting-strict-one-pass").checked = !!s.strict_one_pass;
 }
 
 async function saveKey() {
@@ -25,6 +32,8 @@ async function saveSettings() {
     model: $("#setting-model").value.trim(),
     base_url: $("#setting-base").value.trim(),
     concurrency: parseInt($("#setting-concurrency").value, 10),
+    pipeline: $("#setting-pipeline").value,
+    strict_one_pass: $("#setting-strict-one-pass").checked,
     thinking: $("#setting-thinking").value,
     fill_thinking: $("#setting-fill").value,
   };
@@ -32,6 +41,7 @@ async function saveSettings() {
     const s = await api("/api/settings", { method: "POST", body });
     STATE.settings = s;
     renderSettings(s);
-    toast("Settings saved. Changing provider/model/base URL or translate/fill mode clears the book's translation cache.");
+    syncOnePassControls(s);
+    toast("Settings saved. Pipeline cache is isolated; changing it preserves the sibling pipeline cache.");
   } catch (e) { toast(e.message, "error"); }
 }

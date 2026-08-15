@@ -45,7 +45,7 @@
           <div id="translate-result" class="hidden">
             <p id="translate-summary"></p>
             <a id="download-link" class="btn" href="#">Download EPUB</a>
-            <p id="cache-warning" class="warn hidden">Translation cache was cleared (thinking/fill mode changed).</p>
+            <p id="cache-warning" class="warn hidden">The selected pipeline cache was cleared. The other pipeline's cache was preserved.</p>
           </div>
         </div>
       </section>
@@ -123,6 +123,16 @@
           <input id="setting-base" type="text" placeholder="auto from provider">
           <label for="setting-concurrency">Parallel requests (1–64)</label>
           <input id="setting-concurrency" type="number" min="1" max="64">
+          <label for="setting-pipeline">Translation pipeline</label>
+          <select id="setting-pipeline">
+            <option value="two-pass">Two-pass — recommended for books with substantial legacy cache</option>
+            <option value="one-pass">One-pass — experimental numbered-paragraph protocol</option>
+          </select>
+          <label class="row" for="setting-strict-one-pass">
+            <input id="setting-strict-one-pass" type="checkbox">
+            Stop a one-pass chapter when the numbered protocol cannot be repaired
+          </label>
+          <p class="hint">One-pass uses an isolated cache. Its cost estimate is experimental until benchmark measurements are available. Keep two-pass for books with substantial existing legacy cache.</p>
           <label for="setting-thinking">Translate mode</label>
           <select id="setting-thinking">
             <option value="disabled">Fast (no thinking) — recommended</option>
@@ -135,7 +145,7 @@
             <option value="disabled">No thinking — fastest</option>
           </select>
           <p class="warn hidden" id="setting-thinking-warn"></p>
-          <p class="warn">Changing provider/model/base URL or translate/fill mode clears the book's translation cache.</p>
+          <p class="warn">A marker change clears only the selected pipeline cache. Two-pass keeps the legacy cache path; one-pass uses its own isolated cache.</p>
           <button id="save-settings" class="btn primary">Save settings</button>
         </div>
       </section>
