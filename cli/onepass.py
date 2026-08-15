@@ -14,6 +14,17 @@ The numbered protocol, parser, validator, token-aware grouping, and the
 bounded repair ladder are pure and deterministic. LLM transport/cache and
 EPUB ZIP/metadata/TOC handling are reused from the ``epub_translator``
 package — no HTTP, cache, or ZIP code is invented here.
+
+Validation rejects substantive CJK remnants (contiguous runs of 2+ CJK
+characters) and source copies in strict and non-strict modes alike: the
+bounded repair ladder reroutes the failed items, strict mode aborts with
+OnePassProtocolError when the ladder cannot fix them, and non-strict mode
+preserves the source text and records the failure visibly. A single
+isolated CJK glyph (a quoted term, SPEC §9.1) is legitimate context and is
+never treated as a remnant. The chapter-scoped two-pass fallback is gated
+by the same rule: strict mode reroutes a fallback chapter once through a
+corrective two-pass re-run and then aborts if CJK remains; non-strict mode
+records the remnants in the report instead of shipping them silently.
 """
 
 from __future__ import annotations
@@ -50,7 +61,10 @@ FLAT_TAGS = frozenset({"p"} | HEADING_TAGS)
 
 # Anchor strictly at line start per the plan: ^\[(\d+)\]\s*(.*)$
 _INDEX_RE = re.compile(r"^\[(\d+)\]\s*(.*)$")
-_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff]")
+# Substantive CJK remnant: a contiguous run of 2+ CJK characters. A single
+# isolated glyph (e.g. a quoted term like ``凹``, SPEC §9.1) is legitimate
+# context, not a remnant, and never invalidates a group or a chapter.
+_CJK_RUN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff]{2,}")
 
 # Characters that may appear in a paragraph made purely of punctuation.
 _PUNCTUATION_CHARS = frozenset(
@@ -233,15 +247,17 @@ def _validate_text(unit: TranslationUnit, text: str) -> list[UnitIssue]:
             f"translation suspiciously short ({len(stripped)} chars vs source {source_len})",
         ))
 
-    cjk = _CJK_RE.findall(stripped)
-    if cjk:
+    # Only SUBSTANTIVE CJK (a contiguous run of 2+ characters) invalidates
+    # the item; a single isolated glyph is legitimate context (SPEC §9.1).
+    cjk_runs = _CJK_RUN_RE.findall(stripped)
+    if cjk_runs:
         ratio = difflib.SequenceMatcher(None, unit.source_text, stripped).ratio()
         if ratio > 0.9:
             issues.append(UnitIssue(unit.index, "source_copy", "output is a copy of the source"))
         else:
             issues.append(UnitIssue(
                 unit.index, "cjk",
-                "untranslated CJK characters remain: " + "".join(cjk[:5]),
+                "untranslated CJK characters remain: " + "".join(cjk_runs[:2])[:30],
             ))
     return issues
 
@@ -651,6 +667,44 @@ def _translate_legacy_chapter(
     return True
 
 
+# --------------------------------------------------------------------------
+# Strict CJK gate on the two-pass fallback (plan C3)
+# --------------------------------------------------------------------------
+#
+# The chapter-scoped two-pass fallback reuses the engine's FILL pass, whose
+# structure-only validator accepts source-text backfill (SPEC §9.1). A
+# legacy chapter whose fallback output still contains substantive CJK must
+# therefore be gated explicitly: strict mode reroutes the chapter through
+# one corrective two-pass re-run and aborts (OnePassProtocolError) if the
+# reroute still leaves CJK; non-strict mode keeps the output as-is but
+# records every remnant in the report and emits the on_fill_failed-
+# compatible event, so source copies are visible, never silent.
+
+
+_LEGACY_REMEDY = (
+    "The previous translation of this chapter was rejected because it still "
+    "contained untranslated Chinese source text. Translate every text segment "
+    "into English. Never reproduce, echo, or copy the original Chinese text."
+)
+
+
+def _legacy_cjk_issues(body) -> list[UnitIssue]:
+    """Deterministic scan of a two-pass-translated chapter body for
+    substantive CJK remnants. Uses the same rule as the numbered protocol:
+    a contiguous run of 2+ CJK characters; a single isolated glyph is
+    legitimate context (SPEC §9.1) and is not flagged. Returns one UnitIssue
+    per offending text segment, indexed by segment ordinal (1-based)."""
+    issues: list[UnitIssue] = []
+    for ordinal, segment in enumerate(search_text_segments(body), 1):
+        runs = _CJK_RUN_RE.findall(segment.text or "")
+        if runs:
+            issues.append(UnitIssue(
+                ordinal, "cjk",
+                "untranslated CJK characters remain: " + "".join(runs[:2])[:30],
+            ))
+    return issues
+
+
 def translate_one_pass(
     source_path,
     target_path,
@@ -674,7 +728,11 @@ def translate_one_pass(
     readable. Strict protocol failure behaves the same way but raises
     OnePassProtocolError (which carries the OnePassReport). Non-flat
     chapters are automatically translated by the chapter-scoped two-pass
-    fallback (plan C3) instead of being left untranslated.
+    fallback (plan C3) instead of being left untranslated; in strict mode a
+    fallback chapter whose output still contains substantive CJK remnants
+    is rerouted through one corrective two-pass re-run and then rejected
+    with OnePassProtocolError, and in non-strict mode the remnants are
+    recorded in the report and surfaced through on_protocol_failed.
     """
     source = Path(source_path).resolve()
     target = Path(target_path).resolve()
@@ -793,6 +851,47 @@ def translate_one_pass(
                         on_protocol_failed=on_protocol_failed,
                     ):
                         report.legacy_two_pass_chapters.append(path.as_posix())
+                        issues = _legacy_cjk_issues(body)
+                        _record_issues(report, issues)
+                        if issues and strict:
+                            # Bounded reroute: one corrective re-run of the
+                            # chapter's two-pass engine with an explicit
+                            # no-source-copy directive (busts the chapter's
+                            # cache keys so the retry is a fresh call),
+                            # then re-scan.
+                            if _translate_legacy_chapter(
+                                xml, body,
+                                user_prompt=user_prompt + "\n\n" + _LEGACY_REMEDY,
+                                target_language=target_language,
+                                llm=translation_llm,
+                                max_group_tokens=max_group_tokens,
+                                max_retries=max_retries,
+                                on_protocol_failed=on_protocol_failed,
+                            ):
+                                issues = _legacy_cjk_issues(body)
+                                _record_issues(report, issues)
+                        if issues:
+                            message = (
+                                f"{len(issues)} segment(s) still contain untranslated "
+                                f"CJK after the two-pass fallback"
+                            )
+                            report.failures.append({
+                                "index": 0,
+                                "kinds": ["cjk"],
+                                "message": message,
+                            })
+                            if strict:
+                                raise OnePassProtocolError(
+                                    "two-pass fallback left substantive CJK remnants in "
+                                    f"{path.as_posix()}: {message}",
+                                    report=report,
+                                )
+                            if on_protocol_failed is not None:
+                                on_protocol_failed(FillFailedEvent(
+                                    error_message=message,
+                                    retried_count=0,
+                                    over_maximum_retries=True,
+                                ))
                         with zip.replace(path) as out:
                             xml.save(out)
                 elif units:

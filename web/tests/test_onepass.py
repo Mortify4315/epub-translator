@@ -185,6 +185,54 @@ def _legacy_mixed_handler(prefix="L"):
     return handler
 
 
+def _legacy_fill_handler(prefix="L", backfill=True, fix_on_reroute=True,
+                         legit_glyph=None):
+    """Pilot-shaped two-pass handler for the live CJK-backfill failure:
+    the first fill pass echoes the XML template verbatim, leaving the
+    source Chinese in every text node (exactly what the 2026-08-15 pilot
+    produced — 1,753 CJK chars in chapter 1). A later fill returns a clean
+    marker fill; ``legit_glyph`` leaves a single isolated CJK glyph in one
+    text node (SPEC §9.1 legitimate context). Translate calls are numbered
+    so the strict reroute (a fresh model call with a corrected prompt) can
+    be told apart from the first pass."""
+
+    state = {"translate_calls": 0, "fill_calls": 0}
+
+    def handler(prompt):
+        if "XML template:" in prompt:
+            state["fill_calls"] += 1
+            match = re.search(r"```XML\n(.*?)\n```", prompt, re.S)
+            assert match, "fill pass prompt must carry the XML template"
+            template = match.group(1)
+            if backfill and (state["fill_calls"] == 1 or not fix_on_reroute):
+                # The live failure: the fill model echoes the template
+                # verbatim, so the structure validator accepts it and the
+                # chapter ships with source Chinese backfilled.
+                return template
+            root = ET.fromstring(template)
+            placed = [False]
+            for el in root.iter():
+                block_id = el.get("id") or "0"
+                if legit_glyph is not None and not placed[0] \
+                        and el.text and el.text.strip():
+                    el.text = legit_glyph
+                    placed[0] = True
+                    if el.tail and el.tail.strip():
+                        el.tail = f"{prefix}{block_id}"
+                    continue
+                if el.text and el.text.strip():
+                    el.text = f"{prefix}{block_id}"
+                if el.tail and el.tail.strip():
+                    el.tail = f"{prefix}{block_id}"
+            return ET.tostring(root, encoding="unicode")
+        if re.search(r"^\[\d+\]", prompt, re.M):
+            return _auto_handler("T")(prompt)
+        state["translate_calls"] += 1
+        return f"TRANSLATED-{state['translate_calls']}"
+
+    return handler
+
+
 def _unit(i, text, element=None):
     return TranslationUnit(index=i, source_text=text, target_element=element or ET.Element("p"))
 
@@ -314,6 +362,31 @@ def test_validate_source_copy_flagged_as_source_copy():
     issues = _issues_for("这是一段足够长的中文原文，用于检测原文回显。",
                          "这是一段足够长的中文原文，用于检测原文回显。")
     assert any(i.kind == "source_copy" for i in issues)
+
+
+def test_validate_single_legit_cjk_glyph_allowed():
+    # SPEC §9.1 / benchmark: the model may quote a single CJK glyph (e.g.
+    # the documented ``凹`` case) as legitimate context. A lone glyph is not
+    # a substantive remnant and never invalidates the item.
+    issues = _issues_for(
+        "这是一段足够长的中文原文，用于检测原文回显。",
+        'The model quoted the character "凹" in English prose.',
+    )
+    assert not any(i.kind in ("cjk", "source_copy") for i in issues)
+
+
+def test_validate_single_glyph_source_copy_allowed():
+    # A one-character source translated as itself is the documented quoted-
+    # glyph case, not a source-copy violation.
+    issues = _issues_for("凹", "凹")
+    assert not any(i.kind in ("cjk", "source_copy") for i in issues)
+
+
+def test_validate_two_char_cjk_run_flagged():
+    # Two contiguous CJK characters are a substantive remnant ("你好" is
+    # not a quoted single glyph), so the item stays invalid.
+    issues = _issues_for("这是一段足够长的中文原文。", "He said 你好 and left.")
+    assert any(i.kind == "cjk" for i in issues)
 
 
 def test_validate_missing_and_duplicate_reported():
@@ -476,6 +549,42 @@ def test_ladder_cjk_remnant_recorded_in_report():
     out = translate_units(units, "prompt", fake, max_retries=0, strict=False,
                           seed="s", report=report)
     assert out[1] == "这是一段足够长的中文。"  # fell through to source
+    assert any(r["kind"] == "cjk" for r in report.cjk_remnants)
+
+
+def test_ladder_strict_cjk_reroutes_and_resolves():
+    """Strict mode: a substantive CJK remnant invalidates the group, the
+    bounded ladder reroutes the request with the deterministic validation
+    errors, and the retry resolves the CJK — no source text is shipped."""
+    fake = _FakeLLM(responses=[
+        "[1] 这是完全没有翻译的中文残留。",
+        "[1] Chapter one: the untranslated remnant was resolved.",
+    ])
+    units = [_unit(1, "第1章 他惊人的毅力并无观众。")]
+    report = onepass.OnePassReport()
+    out = translate_units(units, "prompt", fake, max_retries=2, strict=True,
+                          seed="s", report=report)
+    assert out[1] == "Chapter one: the untranslated remnant was resolved."
+    assert len(fake.calls) == 2
+    assert report.full_group_retries == 1
+    assert report.fallback_units == 0
+    # The first pass's remnant was visible in the report before resolution.
+    assert any(r["kind"] == "cjk" for r in report.cjk_remnants)
+
+
+def test_ladder_strict_cjk_unfixable_aborts_bounded():
+    """Bounded failure behavior: when the ladder cannot produce a CJK-free
+    translation, strict mode aborts with OnePassProtocolError after exactly
+    the bounded number of calls (3 full attempts + 1 subset + 1 individual),
+    with zero source-copy fallbacks."""
+    fake = _FakeLLM(handler=lambda prompt: "[1] 还是中文还是中文")
+    units = [_unit(1, "这是一段足够长的中文原文。")]
+    report = onepass.OnePassReport()
+    with pytest.raises(OnePassProtocolError):
+        translate_units(units, "prompt", fake, max_retries=2, strict=True,
+                        seed="s", report=report)
+    assert len(fake.calls) == 5
+    assert report.fallback_units == 0
     assert any(r["kind"] == "cjk" for r in report.cjk_remnants)
 
 
@@ -751,6 +860,107 @@ def test_legacy_fallback_preserves_media_and_structure(tmp_path):
     assert 'class="poem"' in content
     assert 'src="images/cover.png"' in content
     assert "<em>" in content
+
+
+def test_legacy_fallback_strict_reroutes_cjk_backfill(tmp_path):
+    """Live pilot shape: the two-pass fill pass echoes the XML template
+    with the source Chinese backfilled (the 2026-08-15 pilot's 1,753-CJK
+    chapter 1). Strict mode rejects the chapter, reroutes it through one
+    corrective two-pass re-run, and writes back the resolved chapter —
+    no CJK ships and the first pass's remnants stay visible in the report."""
+    src = tmp_path / "src.epub"
+    tgt = tmp_path / "out.epub"
+    _build_epub(src, [["嵌套 第一章", "继续"]], nested=[1])
+    fake = _FakeLLM(handler=_legacy_fill_handler(backfill=True))
+    report = translate_one_pass(
+        src, tgt, "en", "prompt", fake,
+        max_group_tokens=5000, max_retries=2, strict=True, chapter_limit=0,
+    )
+    assert report.chapters_done == 1
+    assert len(report.legacy_two_pass_chapters) == 1
+    # The first pass's backfill was visible in the report, not silent...
+    assert any(r["kind"] == "cjk" for r in report.cjk_remnants)
+    # ... and the bounded reroute resolved it: the chapter ships translated.
+    content = _read_chapter(tgt, "chap1.xhtml")
+    assert "嵌套" not in content and "第一章" not in content
+    assert "L" in content
+
+
+def test_legacy_fallback_strict_aborts_when_reroute_still_cjk(tmp_path):
+    """Bounded failure behavior: when the corrective reroute still leaves
+    substantive CJK, strict mode aborts with OnePassProtocolError instead
+    of shipping the backfilled chapter — exactly one reroute, then a loud,
+    visible failure with the report attached."""
+    src = tmp_path / "src.epub"
+    tgt = tmp_path / "out.epub"
+    _build_epub(src, [["嵌套 第一章"]], nested=[1])
+    fake = _FakeLLM(handler=_legacy_fill_handler(backfill=True,
+                                                 fix_on_reroute=False))
+    with pytest.raises(OnePassProtocolError) as err:
+        translate_one_pass(
+            src, tgt, "en", "prompt", fake,
+            max_group_tokens=5000, max_retries=2, strict=True, chapter_limit=0,
+        )
+    assert err.value.report is not None
+    assert err.value.report.fallback_units == 0
+    assert any(r["kind"] == "cjk" for r in err.value.report.cjk_remnants)
+    assert err.value.report.failures
+    # Bounded: one first pass + exactly one corrective reroute (2 translate
+    # calls, 2 fill calls), then abort.
+    assert sum("XML template:" in c for c in fake.calls) == 2
+    protocol_calls = sum(bool(re.search(r"^\[\d+\]", c, re.M)) for c in fake.calls)
+    translate_calls = len(fake.calls) - 2 - protocol_calls
+    assert translate_calls == 2
+    # The aborted chapter was never written as "translated": the finalized
+    # archive keeps the original source chapter (same contract as the
+    # numbered strict abort).
+    assert "嵌套" in _read_chapter(tgt, "chap1.xhtml")
+
+
+def test_legacy_fallback_non_strict_cjk_remnants_visible(tmp_path):
+    """Non-strict behavior preserved: the two-pass output is kept exactly
+    as the engine produced it, but substantive CJK remnants are no longer
+    silent — they are recorded in the report and surfaced through the
+    on_fill_failed-compatible callback."""
+    src = tmp_path / "src.epub"
+    tgt = tmp_path / "out.epub"
+    _build_epub(src, [["嵌套 第一章"]], nested=[1])
+    fake = _FakeLLM(handler=_legacy_fill_handler(backfill=True))
+    events = []
+    report = translate_one_pass(
+        src, tgt, "en", "prompt", fake,
+        max_group_tokens=5000, max_retries=2, strict=False, chapter_limit=0,
+        on_protocol_failed=events.append,
+    )
+    assert report.chapters_done == 1
+    assert len(report.legacy_two_pass_chapters) == 1
+    assert any(r["kind"] == "cjk" for r in report.cjk_remnants)
+    assert report.failures
+    assert any(e.over_maximum_retries for e in events)
+    # Output preserved as the two-pass engine produced it (the source
+    # backfill stays), now reported instead of silent.
+    assert "第一章" in _read_chapter(tgt, "chap1.xhtml")
+
+
+def test_legacy_fallback_single_legit_cjk_glyph_allowed(tmp_path):
+    """A single isolated CJK glyph in the two-pass fallback output is
+    legitimate context (SPEC §9.1), not a substantive remnant: strict mode
+    accepts the chapter without a reroute."""
+    src = tmp_path / "src.epub"
+    tgt = tmp_path / "out.epub"
+    _build_epub(src, [["嵌套 第一章"]], nested=[1])
+    fake = _FakeLLM(handler=_legacy_fill_handler(backfill=False,
+                                                 legit_glyph="凹"))
+    report = translate_one_pass(
+        src, tgt, "en", "prompt", fake,
+        max_group_tokens=5000, max_retries=2, strict=True, chapter_limit=0,
+    )
+    assert report.chapters_done == 1
+    assert report.cjk_remnants == []
+    assert report.failures == []
+    # No reroute happened: exactly one fill call.
+    assert sum("XML template:" in c for c in fake.calls) == 1
+    assert "凹" in _read_chapter(tgt, "chap1.xhtml")
 
 
 def test_chapter_limit_finalizes_partial_epub_then_raises(tmp_path):
