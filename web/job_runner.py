@@ -183,7 +183,6 @@ def run_translate(book_name: str) -> None:
         "cache_cleared": cache_cleared,
         "chapter_limited": chapter_limited,
         "pipeline": pipeline,
-        "cost_experimental": pipeline == "one-pass",
     }})
 
 

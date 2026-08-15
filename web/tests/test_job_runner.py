@@ -328,6 +328,23 @@ def test_one_pass_usage_budget_guard_accumulates_under_budget(monkeypatch, tmp_p
     assert stop.set_called
 
 
+def test_estimate_is_pipeline_aware(monkeypatch, tmp_path):
+    """The pre-flight estimate uses per-pipeline calibration: one-pass
+    (2.4 tok/char, 60/40 in/out) must predict a fraction of the two-pass
+    (13.5 tok/char, 46/54) tokens and cost for the same book."""
+    core = job_runner.core.translate_book
+    src = tmp_path / "book.epub"
+    _build_epub(src, with_nav=False)
+    monkeypatch.setattr(core, "get_pipeline", lambda: "two-pass")
+    two = core.estimate(src)
+    monkeypatch.setattr(core, "get_pipeline", lambda: "one-pass")
+    one = core.estimate(src)
+    assert two["pipeline"] == "two-pass" and one["pipeline"] == "one-pass"
+    assert two["tokens"] > one["tokens"] * 1.5
+    assert one["cost"] < two["cost"] * 0.6
+    assert "cost_experimental" not in one
+
+
 def test_retry_knobs_flow_into_llm_and_translate(monkeypatch, tmp_path):
     books, out, cache, stop = _patch_run_env(monkeypatch, tmp_path)
     # Pins the two-pass path: retry knobs and `translate` are legacy-engine
@@ -522,7 +539,7 @@ def test_core_run_translation_dispatches_one_pass_with_its_fixed_contract(monkey
     assert (expected_cache / "config.json").is_file()
     assert result["target"] == out / "book.en.epub"
     assert result["pipeline"] == "one-pass"
-    assert result["cost_experimental"] is True
+    assert "cost_experimental" not in result  # one-pass costs are measured now
 
 
 def test_core_one_pass_usage_budget_guard_stops_without_progress(monkeypatch, tmp_path):

@@ -125,14 +125,14 @@
           <input id="setting-concurrency" type="number" min="1" max="64">
           <label for="setting-pipeline">Translation pipeline</label>
           <select id="setting-pipeline">
-            <option value="two-pass">Two-pass — recommended for books with substantial legacy cache</option>
-            <option value="one-pass">One-pass — experimental numbered-paragraph protocol</option>
+            <option value="one-pass">One-pass — recommended (default)</option>
+            <option value="two-pass">Two-pass — books with substantial legacy cache</option>
           </select>
           <label class="row" for="setting-strict-one-pass">
             <input id="setting-strict-one-pass" type="checkbox">
             Stop a one-pass chapter when the numbered protocol cannot be repaired
           </label>
-          <p class="hint">One-pass uses an isolated cache. Its cost estimate is experimental until benchmark measurements are available. Keep two-pass for books with substantial existing legacy cache.</p>
+          <p class="hint">One-pass uses an isolated cache and measured ~6–8x cheaper with cleaner output in the acceptance benchmark. Costs shown are calibrated per pipeline. Pick two-pass for books with substantial existing legacy cache.</p>
           <label for="setting-thinking">Translate mode</label>
           <select id="setting-thinking">
             <option value="disabled">Fast (no thinking) — recommended</option>

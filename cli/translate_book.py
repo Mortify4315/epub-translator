@@ -178,14 +178,20 @@ def prepare_epub(source_path: Path, work_dir: Path) -> Path:
 
 
 def estimate(source_path: Path) -> dict:
-    """Token/cost estimate, calibrated against real runs (2026-08-11).
+    """Token/cost estimate, calibrated against real runs (2026-08-15).
 
     Measured economics (live, deepseek-v4-flash via opencode-go):
-      - 5-chapter run (group 10000): 251,722 tok / 20,215 chars = 12.45 tok/char
-      - 13-chapter run (group 5000):  404,141 tok / 28,325 chars = 14.27 tok/char
-      - blended ≈ 13.5 tokens per source char (translate + fill passes combined)
-      - in/out split ≈ 46% / 54% of total tokens
-    The old chars*1.2 model understated real cost ~10x.
+      two-pass:
+        - 5-chapter run (group 10000): 251,722 tok / 20,215 chars = 12.45 tok/char
+        - 13-chapter run (group 5000):  404,141 tok / 28,325 chars = 14.27 tok/char
+        - blended ≈ 13.5 tokens per source char (translate + fill passes)
+        - in/out split ≈ 46% / 54% of total tokens
+      one-pass (numbered protocol, including ladder repairs):
+        - 100-chapter canary: 535,168 tok / ≈225k chars ≈ 2.4 tok/char
+        - 30-chapter gate:    178,609 tok / ≈70k chars  ≈ 2.5 tok/char
+        - 13-chapter E4:       84,653 tok / ≈36k chars ≈ 2.3 tok/char
+        - blended ≈ 2.4 tokens per source char; in/out split ≈ 60% / 40%
+    The old chars*1.2 model understated real two-pass cost ~10x.
     """
     book = epub.read_epub(source_path)
     chapters = 0
@@ -198,20 +204,22 @@ def estimate(source_path: Path) -> dict:
         for tag in soup(["script", "style"]):
             tag.decompose()
         total_chars += len(soup.get_text())
-    tokens = int(total_chars * 13.5) + chapters * 50
-    input_tokens = int(tokens * 0.46)
-    output_tokens = int(tokens * 0.54)
-    cost = estimate_cost(input_tokens, output_tokens)
     pipeline = get_pipeline()
+    if pipeline == "one-pass":
+        tokens = int(total_chars * 2.4) + chapters * 50
+        input_tokens = int(tokens * 0.60)
+        output_tokens = int(tokens * 0.40)
+    else:
+        tokens = int(total_chars * 13.5) + chapters * 50
+        input_tokens = int(tokens * 0.46)
+        output_tokens = int(tokens * 0.54)
+    cost = estimate_cost(input_tokens, output_tokens)
     return {
         "chapters": chapters,
         "chars": total_chars,
         "tokens": tokens,
         "cost": cost,
         "pipeline": pipeline,
-        # The calibrated constants above cover two-pass only. The UI must not
-        # present this reused figure as a measured one-pass prediction.
-        "cost_experimental": pipeline == "one-pass",
     }
 
 
@@ -418,7 +426,6 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
         "cache_cleared": cache_cleared,
         "chapter_limited": chapter_limited,
         "pipeline": pipeline,
-        "cost_experimental": pipeline == "one-pass",
     }
 
 
