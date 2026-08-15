@@ -10,6 +10,9 @@ Covers, in order:
   * the bounded repair ladder driven by a fake LLM (no paid API)
   * flat-vs-complex structural eligibility and pure-punctuation skipping
   * positional reinsertion that preserves tag/attribute order
+  * chapter-scoped legacy fallback: non-flat chapters are translated by
+    the current two-pass engine (TRANSLATE + FILL) while flat siblings
+    stay on the one-pass protocol, with media/structure intact
   * end-to-end EPUB translation (TOC/metadata/chapters), callbacks,
     chapter-limit finalization, strict abort, and source-copy fallback
 """
@@ -50,10 +53,29 @@ class _SimpleEncoding:
     def encode(self, text):
         return [0] * len(text)
 
+    def decode(self, tokens):
+        return "".join(chr(t) for t in tokens)
+
+
+class _FakeTemplate:
+    """Minimal jinja2.Template stand-in for the two-pass engine's
+    ``llm.template(name).render(...)`` calls."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def render(self, **kwargs):
+        return f"<system template {self.name}>"
+
 
 class _FakeLLM:
     """Stand-in for epub_translator.LLM. Responses are consumed in order;
-    a handler(prompt) -> str replaces the queue when provided."""
+    a handler(prompt) -> str replaces the queue when provided.
+
+    Also satisfies the two-pass engine surface used by the legacy
+    chapter-scoped fallback: ``encoding``, ``template()``, and
+    ``context()`` whose request() accepts str or a list of Messages.
+    """
 
     def __init__(self, responses=None, handler=None):
         self.responses = list(responses or [])
@@ -66,6 +88,9 @@ class _FakeLLM:
         self.seeds.append(cache_seed_content)
         return _FakeCtx(self)
 
+    def template(self, name):
+        return _FakeTemplate(name)
+
 
 class _FakeCtx:
     def __init__(self, llm):
@@ -77,7 +102,13 @@ class _FakeCtx:
     def __exit__(self, *exc):
         return False
 
-    def request(self, prompt):
+    def request(self, input, **kwargs):
+        if isinstance(input, list):
+            # Two-pass engine passes [Message(system), Message(user)]; the
+            # handler only needs the user text (last message).
+            prompt = input[-1].message
+        else:
+            prompt = input
         self.llm.calls.append(prompt)
         if self.llm.handler:
             return self.llm.handler(prompt)
@@ -118,6 +149,40 @@ def _length_handler(prefix="G"):
 
 def _garbage_handler(prompt):
     return "Sorry, I cannot help with that."
+
+
+def _legacy_mixed_handler(prefix="L"):
+    """Serves all three request shapes of a one-pass run that contains
+    non-flat chapters:
+
+      * one-pass protocol requests (``[N] source`` lines) -> ``[N] T``
+        echo, exactly like ``_auto_handler``;
+      * two-pass translate pass (plain source text, no protocol) ->
+        a plain-text translation;
+      * two-pass fill pass (prompt carries the ``XML template:`` block)
+        -> the template echoed back with every text node replaced by a
+        deterministic ``{prefix}{block-id}`` marker (block id ``0`` for
+        inline elements without an id). Structure, tags, and attributes
+        are preserved verbatim, which is all the fill validation checks.
+    """
+
+    def handler(prompt):
+        if "XML template:" in prompt:
+            match = re.search(r"```XML\n(.*?)\n```", prompt, re.S)
+            assert match, "fill pass prompt must carry the XML template"
+            root = ET.fromstring(match.group(1))
+            for el in root.iter():
+                block_id = el.get("id") or "0"
+                if el.text and el.text.strip():
+                    el.text = f"{prefix}{block_id}"
+                if el.tail and el.tail.strip():
+                    el.tail = f"{prefix}{block_id}"
+            return ET.tostring(root, encoding="unicode")
+        if re.search(r"^\[\d+\]", prompt, re.M):
+            return _auto_handler("T")(prompt)
+        return "TRANSLATED"
+
+    return handler
 
 
 def _unit(i, text, element=None):
@@ -507,19 +572,36 @@ def test_reinsertion_alters_text_only_preserves_attributes():
 # --------------------------------------------------------------------------
 
 
-def _build_epub(path, chapters, *, with_nav=True, title="测试书名", nested=False):
+def _build_epub(path, chapters, *, with_nav=True, title="测试书名", nested=False,
+                custom=None, media=False):
+    """Build a test epub.
+
+    ``chapters`` is a list of paragraph lists. ``nested`` makes selected
+    chapters non-flat (``<p>嵌套 <em>...</em></p>``). ``custom`` maps
+    chapter index (1-based) to a full body inner-HTML override. ``media``
+    adds a real image entry (images/cover.png) to the archive.
+    """
     from ebooklib import epub
     if isinstance(nested, (list, set, tuple)):
         nested_idx = set(nested)
     else:
         nested_idx = set(range(1, len(chapters) + 1)) if nested else set()
+    custom = custom or {}
     book = epub.EpubBook()
     book.set_identifier("id-onepass-test")
     book.set_title(title)
     book.set_language("zh")
     items = []
+    if media:
+        img = epub.EpubImage()
+        img.file_name = "images/cover.png"
+        img.media_type = "image/png"
+        img.content = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+        book.add_item(img)
     for i, paras in enumerate(chapters, 1):
-        if i in nested_idx:
+        if i in custom:
+            body = custom[i]
+        elif i in nested_idx:
             body = "".join(f"<p>嵌套 <em>{p}</em></p>" for p in paras)
         else:
             body = "".join(f"<p>{p}</p>" for p in paras)
@@ -599,22 +681,76 @@ def test_translate_one_pass_multiple_groups_per_chapter(tmp_path):
         assert f"G{3 + i}" in content  # "第{i}段" + i*"很" is 3+i chars
 
 
-def test_legacy_chapter_routed_and_left_unchanged(tmp_path):
+def test_legacy_chapter_routed_to_two_pass_fallback(tmp_path):
+    """Plan C3: a non-flat chapter is automatically translated by the
+    chapter-scoped two-pass fallback, while a flat sibling stays on the
+    one-pass protocol (and never sees the two-pass route)."""
     src = tmp_path / "src.epub"
     tgt = tmp_path / "out.epub"
-    _build_epub(src, [["flat one"], ["nested two"]], nested=[2])
-    fake = _FakeLLM(handler=_auto_handler("T"))
+    _build_epub(src, [["flat one"], ["嵌套二"]], nested=[2])
+    fake = _FakeLLM(handler=_legacy_mixed_handler("L"))
     report = translate_one_pass(
         src, tgt, "en", "prompt", fake,
         max_group_tokens=5000, max_retries=2, strict=False, chapter_limit=0,
     )
     assert len(report.legacy_chapters) == 1
+    assert report.legacy_chapters[0].endswith("chap2.xhtml")
+    # The ineligible chapter was routed, not merely reported.
+    assert report.legacy_two_pass_chapters == report.legacy_chapters
     assert report.chapters_done == 2
+    # Flat sibling: one-pass protocol only — no two-pass markers.
     flat = _read_chapter(tgt, "chap1.xhtml")
     assert "T1" in flat and "flat one" not in flat
+    assert "L" not in flat
+    # Legacy chapter: translated by the two-pass route, source gone,
+    # inline structure preserved.
     content = _read_chapter(tgt, "chap2.xhtml")
-    assert "嵌套" in content  # untouched (legacy routing is the caller's job)
-    assert "nested two" in content
+    assert "嵌套二" not in content
+    assert "L1" in content and "L0" in content
+    assert "<em>" in content
+    # The two-pass route reused the legacy engine's cache namespace.
+    from importlib import metadata as _metadata
+    legacy_seed = f"{_metadata.version('epub-translator')}:en"
+    assert legacy_seed in fake.seeds
+
+
+def test_legacy_fallback_preserves_media_and_structure(tmp_path):
+    """The legacy fallback must not damage the archive: media entries and
+    non-translated structure survive, the flat sibling still runs the
+    one-pass protocol, and every source file is still present."""
+    src = tmp_path / "src.epub"
+    tgt = tmp_path / "out.epub"
+    custom = {
+        2: '<img src="images/cover.png" alt="插图"/>'
+           '<div class="poem"><p>嵌套 <em>重点</em></p></div>',
+    }
+    _build_epub(src, [["flat one"], ["unused"]], custom=custom, media=True)
+    fake = _FakeLLM(handler=_legacy_mixed_handler("L"))
+    report = translate_one_pass(
+        src, tgt, "en", "prompt", fake,
+        max_group_tokens=5000, max_retries=2, strict=False, chapter_limit=0,
+    )
+    assert report.chapters_done == 2
+    assert len(report.legacy_two_pass_chapters) == 1
+    assert report.legacy_two_pass_chapters[0].endswith("chap2.xhtml")
+    # Media/structure: every original archive entry survives.
+    with zipfile.ZipFile(src) as zf:
+        src_names = set(zf.namelist())
+    with zipfile.ZipFile(tgt) as zf:
+        tgt_names = set(zf.namelist())
+    assert tgt_names == src_names
+    assert any(n.endswith("images/cover.png") for n in tgt_names)
+    # Flat sibling stays one-pass.
+    flat = _read_chapter(tgt, "chap1.xhtml")
+    assert "T1" in flat and "L" not in flat
+    # Legacy chapter: translated, block attributes and the image
+    # reference preserved.
+    content = _read_chapter(tgt, "chap2.xhtml")
+    assert "嵌套" not in content and "重点" not in content
+    assert "L1" in content
+    assert 'class="poem"' in content
+    assert 'src="images/cover.png"' in content
+    assert "<em>" in content
 
 
 def test_chapter_limit_finalizes_partial_epub_then_raises(tmp_path):
@@ -709,20 +845,26 @@ def test_all_punctuation_chapter_makes_no_requests(tmp_path):
     assert "……" in _read_chapter(tgt, "chap1.xhtml")  # position unchanged
 
 
-def test_no_eligible_content_no_requests(tmp_path):
+def test_legacy_only_book_routed_to_two_pass(tmp_path):
     src = tmp_path / "src.epub"
     tgt = tmp_path / "out.epub"
     _build_epub(src, [["嵌套"]], nested=True)
-    fake = _FakeLLM(handler=_auto_handler())
+    fake = _FakeLLM(handler=_legacy_mixed_handler("L"))
     report = translate_one_pass(
         src, tgt, "en", "prompt", fake,
         max_group_tokens=5000, max_retries=2, strict=False, chapter_limit=0,
     )
-    # Headers (TOC/metadata) still translate; the legacy chapter never
-    # enters a request.
-    assert not any("嵌套" in c for c in fake.calls)
+    # Headers (TOC/metadata) still translate via the one-pass protocol;
+    # the one-pass engine itself translated no flat units.
     assert report.translated_units == 0
     assert len(report.legacy_chapters) == 1
+    assert report.legacy_two_pass_chapters == report.legacy_chapters
+    # The two-pass route saw the chapter's source text in a request.
+    assert any("嵌套" in c for c in fake.calls)
+    # ... and the chapter body was translated, not left as source.
+    content = _read_chapter(tgt, "chap1.xhtml")
+    assert "嵌套" not in content
+    assert "L" in content
     assert tgt.exists()
 
 
