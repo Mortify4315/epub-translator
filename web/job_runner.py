@@ -92,6 +92,8 @@ def run_translate(book_name: str) -> None:
 
     translation_llm = make_llm(core.config.get_extra_body())
     fill_llm = make_llm(core.config.get_fill_extra_body()) if pipeline == "two-pass" else None
+    usage_budget_guard = core.translate_book.UsageBudgetGuard(
+        budget, translation_llm, fill_llm)
 
     est = core.translate_book.estimate(source_path)
     headers = count_headers(source_for_translation)
@@ -115,9 +117,7 @@ def run_translate(book_name: str) -> None:
         emit_log("warn", f"One-pass protocol fallback: {detail}")
 
     def budget_aware_progress(frac: float) -> None:
-        used = translation_llm.total_tokens + (fill_llm.total_tokens if fill_llm else 0)
-        if used > budget:
-            raise core.translate_book.BudgetExceeded(budget, used)
+        usage_budget_guard.check()
         on_progress(frac)
 
     experimental = "; estimate is experimental" if pipeline == "one-pass" else ""
@@ -125,19 +125,21 @@ def run_translate(book_name: str) -> None:
     chapter_limited = False
     try:
         if pipeline == "one-pass":
-            core.translate_book.load_one_pass_translator()(
-                source_path=str(source_for_translation),
-                target_path=str(target_path),
-                target_language=core.translate_book.language.ENGLISH,
-                user_prompt=prompt,
-                translation_llm=translation_llm,
-                max_group_tokens=core.config.get_max_group_tokens(),
-                max_retries=core.config.get_max_retries(),
-                strict=core.config.get_strict_one_pass(),
-                chapter_limit=chapter_limit,
-                on_progress=on_progress,
-                on_protocol_failed=on_protocol_failed,
-            )
+            with usage_budget_guard:
+                core.translate_book.load_one_pass_translator()(
+                    source_path=str(source_for_translation),
+                    target_path=str(target_path),
+                    target_language=core.translate_book.language.ENGLISH,
+                    user_prompt=prompt,
+                    translation_llm=translation_llm,
+                    max_group_tokens=core.config.get_max_group_tokens(),
+                    max_retries=core.config.get_max_retries(),
+                    strict=core.config.get_strict_one_pass(),
+                    chapter_limit=chapter_limit,
+                    on_progress=budget_aware_progress,
+                    on_protocol_failed=on_protocol_failed,
+                )
+                usage_budget_guard.check()
         else:
             core.translate_book.translate(
                 source_path=str(source_for_translation),

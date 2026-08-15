@@ -1,6 +1,7 @@
 import json
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -109,6 +110,29 @@ class _FakeLLM:
         self.output_tokens = 5
 
 
+class _UsageReportingStatistics:
+    """Minimal stand-in for epub_translator's streamed usage sink."""
+
+    def __init__(self, llm):
+        self.llm = llm
+
+    def submit_usage(self, usage):
+        self.llm.total_tokens += usage.total_tokens
+        self.llm.input_tokens += usage.prompt_tokens
+        self.llm.output_tokens += usage.completion_tokens
+
+
+class _UsageReportingFakeLLM(_FakeLLM):
+    def __init__(self):
+        super().__init__()
+        # epub_translator.Statistics starts from zero; the base fake's 10/5
+        # presets only model the post-run totals.
+        self.total_tokens = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self._statistics = _UsageReportingStatistics(self)
+
+
 def _patch_run_env(monkeypatch, tmp_path, book_name="test_book.epub"):
     """Patch config dirs and peripheral functions so run_translate is hermetic."""
     books = tmp_path / "books"
@@ -161,6 +185,143 @@ def test_budget_exceeded_emits_error_deletes_target_keeps_cache(monkeypatch, tmp
     cache_path = cache / job_runner.core.glossary.book_key("test_book.epub")
     assert cache_path.is_dir()
     assert (cache_path / "config.json").is_file()
+    assert stop.set_called
+
+
+def test_one_pass_usage_budget_guard_stops_without_progress_and_preserves_sibling_cache(monkeypatch, tmp_path):
+    """A streamed usage update must stop one-pass before any chapter callback."""
+    books, out, cache, stop = _patch_run_env(monkeypatch, tmp_path)
+    out.mkdir()
+    target = out / "test_book.en.epub"
+    target.write_bytes(b"incomplete output")
+    key = job_runner.core.glossary.book_key("test_book.epub")
+    legacy_cache = cache / key
+    legacy_cache.mkdir(parents=True)
+    sibling_response = legacy_cache / "two-pass-response.txt"
+    sibling_response.write_text("keep", encoding="utf-8")
+
+    monkeypatch.setattr(job_runner.core.config, "get_pipeline", lambda: "one-pass")
+    monkeypatch.setattr(job_runner.core.config, "get_token_budget", lambda name: 100)
+    monkeypatch.setattr(job_runner.core.translate_book, "LLM",
+                        lambda **kwargs: _UsageReportingFakeLLM())
+
+    def fake_one_pass(**kwargs):
+        # Real LLMs report each streamed usage chunk through this sink; no
+        # chapter/on_progress callback is made before the overrun.
+        kwargs["translation_llm"]._statistics.submit_usage(
+            types.SimpleNamespace(total_tokens=101, prompt_tokens=60, completion_tokens=41))
+
+    monkeypatch.setattr(job_runner.core.translate_book, "load_one_pass_translator",
+                        lambda: fake_one_pass)
+    recorded = []
+    monkeypatch.setattr(job_runner, "_emit", recorded.append)
+
+    with pytest.raises(job_runner.core.translate_book.BudgetExceeded) as exc:
+        job_runner.run_translate("test_book.epub")
+
+    assert exc.value.used == 101
+    assert any(e["type"] == "log" and e["level"] == "error"
+               and "Budget exceeded: used 101 of 100 tokens" in e["msg"]
+               for e in recorded)
+    assert not target.exists()
+    assert sibling_response.read_text(encoding="utf-8") == "keep"
+    assert stop.set_called
+
+
+def test_one_pass_chapter_limit_keeps_partial_output_and_sibling_cache(monkeypatch, tmp_path):
+    books, out, cache, stop = _patch_run_env(monkeypatch, tmp_path)
+    out.mkdir()
+    key = job_runner.core.glossary.book_key("test_book.epub")
+    legacy_cache = cache / key
+    legacy_cache.mkdir(parents=True)
+    sibling_response = legacy_cache / "two-pass-response.txt"
+    sibling_response.write_text("keep", encoding="utf-8")
+
+    monkeypatch.setattr(job_runner.core.config, "get_pipeline", lambda: "one-pass")
+    monkeypatch.setattr(job_runner.core.translate_book, "LLM", lambda **kwargs: _FakeLLM())
+
+    def fake_one_pass(**kwargs):
+        target = Path(kwargs["target_path"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"valid chapter-limited epub")
+        raise job_runner.core.translate_book.ChapterLimitReached(1)
+
+    monkeypatch.setattr(job_runner.core.translate_book, "load_one_pass_translator",
+                        lambda: fake_one_pass)
+    recorded = []
+    monkeypatch.setattr(job_runner, "_emit", recorded.append)
+
+    job_runner.run_translate("test_book.epub")
+
+    target = out / "test_book.en.epub"
+    assert target.read_bytes() == b"valid chapter-limited epub"
+    assert sibling_response.read_text(encoding="utf-8") == "keep"
+    result = next(e["result"] for e in recorded if e["type"] == "result")
+    assert result["chapter_limited"] is True
+    assert stop.set_called
+
+
+def test_one_pass_progress_point_stops_without_sink(monkeypatch, tmp_path):
+    """Without a usage sink (test doubles, future engines), one-pass still
+    stops at the next chapter progress callback."""
+    books, out, cache, stop = _patch_run_env(monkeypatch, tmp_path)
+    out.mkdir()
+    target = out / "test_book.en.epub"
+    target.write_bytes(b"incomplete output")
+
+    monkeypatch.setattr(job_runner.core.config, "get_pipeline", lambda: "one-pass")
+    monkeypatch.setattr(job_runner.core.config, "get_token_budget", lambda name: 100)
+    monkeypatch.setattr(job_runner.core.translate_book, "LLM",
+                        lambda **kwargs: _FakeLLM(total_tokens=0))
+
+    def fake_one_pass(**kwargs):
+        # A double that only reports usage through total_tokens, surfaced at
+        # the chapter progress callback (no _statistics sink to patch).
+        kwargs["translation_llm"].total_tokens = 150
+        kwargs["on_progress"](0.2)
+
+    monkeypatch.setattr(job_runner.core.translate_book, "load_one_pass_translator",
+                        lambda: fake_one_pass)
+    recorded = []
+    monkeypatch.setattr(job_runner, "_emit", recorded.append)
+
+    with pytest.raises(job_runner.core.translate_book.BudgetExceeded) as exc:
+        job_runner.run_translate("test_book.epub")
+
+    assert exc.value.used == 150
+    assert any(e["type"] == "log" and e["level"] == "error"
+               and "Budget exceeded: used 150 of 100 tokens" in e["msg"]
+               for e in recorded)
+    assert not target.exists()
+    assert stop.set_called
+
+
+def test_one_pass_usage_budget_guard_accumulates_under_budget(monkeypatch, tmp_path):
+    """Multiple streamed usage chunks accumulate; staying under budget
+    completes the run and emits the result with the summed usage."""
+    books, out, cache, stop = _patch_run_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(job_runner.core.config, "get_pipeline", lambda: "one-pass")
+    monkeypatch.setattr(job_runner.core.config, "get_token_budget", lambda name: 100)
+    monkeypatch.setattr(job_runner.core.translate_book, "LLM",
+                        lambda **kwargs: _UsageReportingFakeLLM())
+
+    def fake_one_pass(**kwargs):
+        llm = kwargs["translation_llm"]
+        for _ in range(3):
+            llm._statistics.submit_usage(
+                types.SimpleNamespace(total_tokens=30, prompt_tokens=18, completion_tokens=12))
+        kwargs["on_progress"](0.5)
+
+    monkeypatch.setattr(job_runner.core.translate_book, "load_one_pass_translator",
+                        lambda: fake_one_pass)
+    recorded = []
+    monkeypatch.setattr(job_runner, "_emit", recorded.append)
+
+    job_runner.run_translate("test_book.epub")
+
+    result = next(e["result"] for e in recorded if e["type"] == "result")
+    assert result["input_tokens"] == 54
+    assert result["output_tokens"] == 36
     assert stop.set_called
 
 
@@ -352,3 +513,74 @@ def test_core_run_translation_dispatches_one_pass_with_its_fixed_contract(monkey
     assert result["target"] == out / "book.en.epub"
     assert result["pipeline"] == "one-pass"
     assert result["cost_experimental"] is True
+
+
+def test_core_one_pass_usage_budget_guard_stops_without_progress(monkeypatch, tmp_path):
+    core = job_runner.core.translate_book
+    source = tmp_path / "book.epub"
+    source.write_bytes(b"source")
+    out = tmp_path / "out"
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(core, "OUT_DIR", out)
+    monkeypatch.setattr(core, "CACHE_DIR", cache)
+    monkeypatch.setattr(core, "validate_ready", lambda: [])
+    monkeypatch.setattr(core, "get_api_key", lambda: "test-key")
+    monkeypatch.setattr(core, "get_pipeline", lambda: "one-pass")
+    monkeypatch.setattr(core, "get_provider", lambda: "deepseek")
+    monkeypatch.setattr(core, "get_base_url", lambda: "https://api.deepseek.com")
+    monkeypatch.setattr(core, "get_model", lambda: "deepseek-v4-flash")
+    monkeypatch.setattr(core, "get_extra_body", lambda: {})
+    monkeypatch.setattr(core, "get_max_group_tokens", lambda: 4321)
+    monkeypatch.setattr(core, "get_max_retries", lambda: 2)
+    monkeypatch.setattr(core, "get_retry_times", lambda: 3)
+    monkeypatch.setattr(core, "get_token_budget", lambda name: 100)
+    monkeypatch.setattr(core, "get_chapter_limit", lambda: 0)
+    monkeypatch.setattr(core, "merge_glossaries", lambda key: {})
+    monkeypatch.setattr(core, "build_translation_prompt", lambda glossary: "translate")
+    monkeypatch.setattr(core, "prepare_epub", lambda path, work_dir: path)
+    monkeypatch.setattr(core, "estimate", lambda path: {"chapters": 1})
+    monkeypatch.setattr(core, "count_headers", lambda path: 0)
+    monkeypatch.setattr(core, "LLM", lambda **kwargs: _UsageReportingFakeLLM())
+
+    def fake_one_pass(**kwargs):
+        kwargs["translation_llm"]._statistics.submit_usage(
+            types.SimpleNamespace(total_tokens=101, prompt_tokens=60, completion_tokens=41))
+
+    monkeypatch.setattr(core, "load_one_pass_translator", lambda: fake_one_pass)
+
+    with pytest.raises(core.BudgetExceeded) as exc:
+        core.run_translation(source)
+
+    assert exc.value.used == 101
+
+
+def test_usage_budget_guard_restores_sink_on_exit():
+    """The patched usage sink must be restored on clean exit and when a
+    BudgetExceeded interrupts the run, so later code never sees the wrapper."""
+    core = job_runner.core.translate_book
+    llm = _UsageReportingFakeLLM()
+    original = llm._statistics.submit_usage
+
+    def same_method(a, b):
+        # Bound methods are recreated per attribute access, so compare the
+        # underlying function and instance rather than object identity.
+        return a.__func__ is b.__func__ and a.__self__ is b.__self__
+
+    with core.UsageBudgetGuard(100, llm):
+        assert llm._statistics.submit_usage is not original
+    assert same_method(llm._statistics.submit_usage, original)
+
+    # Overrun raised from inside the patched sink: guard exits, sink restored.
+    with pytest.raises(core.BudgetExceeded) as exc:
+        with core.UsageBudgetGuard(100, llm):
+            llm._statistics.submit_usage(
+                types.SimpleNamespace(total_tokens=101, prompt_tokens=60, completion_tokens=41))
+    assert exc.value.used == 101
+    assert same_method(llm._statistics.submit_usage, original)
+
+    # A second run starts from the restored sink: prior usage still counts.
+    with pytest.raises(core.BudgetExceeded):
+        with core.UsageBudgetGuard(100, llm):
+            llm._statistics.submit_usage(
+                types.SimpleNamespace(total_tokens=1, prompt_tokens=1, completion_tokens=0))
+    assert same_method(llm._statistics.submit_usage, original)
