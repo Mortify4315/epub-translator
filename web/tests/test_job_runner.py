@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 
 import pytest
 
@@ -202,3 +204,131 @@ def test_cache_config_marker_includes_max_group_tokens(monkeypatch, tmp_path):
     cache_path = cache / job_runner.core.glossary.book_key("test_book.epub")
     marker = json.loads((cache_path / "config.json").read_text(encoding="utf-8"))
     assert marker["max_group_tokens"] == 4321
+
+
+def test_one_pass_cache_is_isolated_and_marker_captures_pipeline_identity(monkeypatch, tmp_path):
+    books, out, cache, stop = _patch_run_env(monkeypatch, tmp_path)
+    key = job_runner.core.glossary.book_key("test_book.epub")
+    legacy_cache = cache / key
+    legacy_cache.mkdir(parents=True)
+    (legacy_cache / "config.json").write_text('{"legacy": true}', encoding="utf-8")
+    (legacy_cache / "legacy-entry").write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(job_runner.core.config, "get_pipeline", lambda: "one-pass")
+    monkeypatch.setattr(job_runner.core.config, "get_strict_one_pass", lambda: True)
+    monkeypatch.setattr(job_runner.core.config, "get_provider", lambda: "opencode-go")
+    monkeypatch.setattr(job_runner.core.config, "get_base_url", lambda: "https://relay.example/v1")
+    monkeypatch.setattr(job_runner.core.config, "get_model", lambda: "deepseek-v4-flash")
+    monkeypatch.setattr(job_runner.core.config, "get_extra_body",
+                        lambda: {"thinking": {"type": "disabled"}})
+    monkeypatch.setattr(job_runner.core.config, "get_max_group_tokens", lambda: 4321)
+    monkeypatch.setattr(job_runner.core.translate_book, "get_provider", lambda: "opencode-go")
+    monkeypatch.setattr(job_runner.core.translate_book, "get_base_url", lambda: "https://relay.example/v1")
+    monkeypatch.setattr(job_runner.core.translate_book, "get_model", lambda: "deepseek-v4-flash")
+    monkeypatch.setattr(job_runner.core.translate_book, "get_extra_body",
+                        lambda: {"thinking": {"type": "disabled"}})
+    monkeypatch.setattr(job_runner.core.translate_book, "get_max_group_tokens", lambda: 4321)
+    monkeypatch.setattr(job_runner.core.translate_book, "LLM", lambda **kwargs: _FakeLLM())
+    calls = []
+
+    def fake_one_pass(**kwargs):
+        calls.append(kwargs)
+        kwargs["on_protocol_failed"]({"message": "duplicate index 2"})
+
+    onepass = types.ModuleType("onepass")
+    onepass.translate_one_pass = fake_one_pass
+    monkeypatch.setitem(sys.modules, "onepass", onepass)
+    events = []
+    monkeypatch.setattr(job_runner, "_emit", events.append)
+
+    job_runner.run_translate("test_book.epub")
+
+    onepass_cache = legacy_cache / "pipelines" / "one-pass-v1"
+    marker = json.loads((onepass_cache / "config.json").read_text(encoding="utf-8"))
+    assert (legacy_cache / "legacy-entry").read_text(encoding="utf-8") == "keep"
+    assert marker == {
+        "base_url": "https://relay.example/v1",
+        "glossary_prompt": "translate",
+        "max_group_tokens": 4321,
+        "model": "deepseek-v4-flash",
+        "pipeline": "one-pass-v1",
+        "provider": "opencode-go",
+        "protocol_version": 1,
+        "target_language": "English",
+        "thinking": "disabled",
+    }
+    assert calls[0]["strict"] is True
+    assert calls[0]["target_language"] == job_runner.core.translate_book.language.ENGLISH
+    assert any("One-pass protocol fallback" in event["msg"] for event in events
+               if event["type"] == "log")
+
+
+def test_one_pass_marker_mismatch_only_clears_one_pass_namespace(monkeypatch, tmp_path):
+    books, out, cache, stop = _patch_run_env(monkeypatch, tmp_path)
+    key = job_runner.core.glossary.book_key("test_book.epub")
+    legacy_cache = cache / key
+    legacy_cache.mkdir(parents=True)
+    (legacy_cache / "legacy-entry").write_text("keep", encoding="utf-8")
+    onepass_cache = legacy_cache / "pipelines" / "one-pass-v1"
+    onepass_cache.mkdir(parents=True)
+    (onepass_cache / "config.json").write_text('{"protocol_version": 0}', encoding="utf-8")
+    (onepass_cache / "stale-entry").write_text("discard", encoding="utf-8")
+    monkeypatch.setattr(job_runner.core.config, "get_pipeline", lambda: "one-pass")
+    monkeypatch.setattr(job_runner.core.config, "get_provider", lambda: "deepseek")
+    monkeypatch.setattr(job_runner.core.config, "get_base_url", lambda: "https://api.deepseek.com")
+    monkeypatch.setattr(job_runner.core.config, "get_model", lambda: "deepseek-v4-flash")
+    monkeypatch.setattr(job_runner.core.translate_book, "get_provider", lambda: "deepseek")
+    monkeypatch.setattr(job_runner.core.translate_book, "get_base_url", lambda: "https://api.deepseek.com")
+    monkeypatch.setattr(job_runner.core.translate_book, "get_model", lambda: "deepseek-v4-flash")
+    monkeypatch.setattr(job_runner.core.translate_book, "LLM", lambda **kwargs: _FakeLLM())
+    onepass = types.ModuleType("onepass")
+    onepass.translate_one_pass = lambda **kwargs: None
+    monkeypatch.setitem(sys.modules, "onepass", onepass)
+
+    job_runner.run_translate("test_book.epub")
+
+    assert (legacy_cache / "legacy-entry").read_text(encoding="utf-8") == "keep"
+    assert not (onepass_cache / "stale-entry").exists()
+
+
+def test_core_run_translation_dispatches_one_pass_with_its_fixed_contract(monkeypatch, tmp_path):
+    core = job_runner.core.translate_book
+    source = tmp_path / "book.epub"
+    source.write_bytes(b"source")
+    out = tmp_path / "out"
+    cache = tmp_path / "cache"
+    llm_calls = []
+    onepass_calls = []
+    monkeypatch.setattr(core, "OUT_DIR", out)
+    monkeypatch.setattr(core, "CACHE_DIR", cache)
+    monkeypatch.setattr(core, "validate_ready", lambda: [])
+    monkeypatch.setattr(core, "get_api_key", lambda: "test-key")
+    monkeypatch.setattr(core, "get_pipeline", lambda: "one-pass")
+    monkeypatch.setattr(core, "get_strict_one_pass", lambda: True)
+    monkeypatch.setattr(core, "get_provider", lambda: "deepseek")
+    monkeypatch.setattr(core, "get_base_url", lambda: "https://api.deepseek.com")
+    monkeypatch.setattr(core, "get_model", lambda: "deepseek-v4-flash")
+    monkeypatch.setattr(core, "get_extra_body", lambda: {"thinking": {"type": "disabled"}})
+    monkeypatch.setattr(core, "get_max_group_tokens", lambda: 4321)
+    monkeypatch.setattr(core, "get_max_retries", lambda: 2)
+    monkeypatch.setattr(core, "get_retry_times", lambda: 3)
+    monkeypatch.setattr(core, "get_token_budget", lambda name: 1_000_000)
+    monkeypatch.setattr(core, "get_chapter_limit", lambda: 0)
+    monkeypatch.setattr(core, "merge_glossaries", lambda key: {})
+    monkeypatch.setattr(core, "build_translation_prompt", lambda glossary: "translate")
+    monkeypatch.setattr(core, "prepare_epub", lambda path, work_dir: path)
+    monkeypatch.setattr(core, "estimate", lambda path: {"chapters": 1})
+    monkeypatch.setattr(core, "count_headers", lambda path: 0)
+    monkeypatch.setattr(core, "LLM", lambda **kwargs: llm_calls.append(kwargs) or _FakeLLM())
+    monkeypatch.setattr(core, "load_one_pass_translator",
+                        lambda: lambda **kwargs: onepass_calls.append(kwargs))
+
+    result = core.run_translation(source)
+
+    expected_cache = cache / "book" / "pipelines" / "one-pass-v1"
+    assert len(llm_calls) == 1
+    assert onepass_calls[0]["strict"] is True
+    assert onepass_calls[0]["max_group_tokens"] == 4321
+    assert (expected_cache / "config.json").is_file()
+    assert result["target"] == out / "book.en.epub"
+    assert result["pipeline"] == "one-pass"
+    assert result["cost_experimental"] is True

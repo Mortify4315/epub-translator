@@ -5,6 +5,8 @@ settings file — never the real one.
 """
 import json
 
+import pytest
+
 import core_loader
 
 config = core_loader.config
@@ -103,6 +105,30 @@ def test_chapter_limit(tmp_path, monkeypatch):
     assert config.get_chapter_limit() == 0
     _fresh_settings(tmp_path, monkeypatch, {"chapter_limit": "bogus"})
     assert config.get_chapter_limit() == 0
+
+
+def test_pipeline_defaults_to_two_pass_and_normalizes_invalid_values(tmp_path, monkeypatch):
+    _fresh_settings(tmp_path, monkeypatch, {})
+    assert config.get_pipeline() == "two-pass"
+    _fresh_settings(tmp_path, monkeypatch, {"pipeline": "one-pass"})
+    assert config.get_pipeline() == "one-pass"
+    _fresh_settings(tmp_path, monkeypatch, {"pipeline": "experimental"})
+    assert config.get_pipeline() == "two-pass"
+
+
+def test_strict_one_pass_requires_a_real_boolean(tmp_path, monkeypatch):
+    _fresh_settings(tmp_path, monkeypatch, {"strict_one_pass": True})
+    assert config.get_strict_one_pass() is True
+    _fresh_settings(tmp_path, monkeypatch, {"strict_one_pass": "true"})
+    assert config.get_strict_one_pass() is False
+
+
+def test_opencode_go_flash_cost_accounts_for_cached_input(tmp_path, monkeypatch):
+    _fresh_settings(tmp_path, monkeypatch, {
+        "provider": "opencode-go", "model": "deepseek-v4-flash"})
+    assert config.get_prices() == (0.14, 0.28)
+    assert config.estimate_cost(1_000_000, 1_000_000,
+                                cached_input_tokens=1_000_000) == pytest.approx(0.2828)
 
 
 def test_concurrency_clamped(tmp_path, monkeypatch):
