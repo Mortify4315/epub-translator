@@ -66,7 +66,12 @@ _INDEX_RE = re.compile(r"^\[(\d+)\]\s*(.*)$")
 # Substantive CJK remnant: a contiguous run of 2+ CJK characters. A single
 # isolated glyph (e.g. a quoted term like ``凹``, SPEC §9.1) is legitimate
 # context, not a remnant, and never invalidates a group or a chapter.
-_CJK_RUN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff]{2,}")
+# Ranges mirror the benchmark harness: BMP CJK + Kana + Extension B
+# (rare name/historical characters such as ``𠮷`` must not ship silently).
+_CJK_RUN_RE = re.compile(
+    r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff"
+    r"\U00020000-\U0002fa1f]{2,}"
+)
 
 # Characters that may appear in a paragraph made purely of punctuation.
 _PUNCTUATION_CHARS = frozenset(

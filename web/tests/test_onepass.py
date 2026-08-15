@@ -391,6 +391,14 @@ def test_validate_two_char_cjk_run_flagged():
     assert any(i.kind == "cjk" for i in issues)
 
 
+def test_validate_extension_b_cjk_run_flagged():
+    # Extension-B characters (rare names/historical glyphs such as 𠮷)
+    # must not ship silently: a 2+ contiguous run is a substantive
+    # remnant, matching the benchmark harness's CJK ranges.
+    issues = _issues_for("这是一段足够长的中文原文。", "His name was 𠮷野 and he left.")
+    assert any(i.kind == "cjk" for i in issues)
+
+
 def test_validate_missing_and_duplicate_reported():
     units = [_unit(1, "甲"), _unit(2, "乙")]
     parsed = parse_group("[1] a\n\n[1] a", 2)

@@ -150,6 +150,47 @@ def test_gate_evaluation_rejects_quality_regressions_and_accepts_go_result():
     assert no_go.gates["zero_fallbacks"]["passed"] is False
 
 
+def test_no_cjk_gate_measures_output_not_repaired_intermediates():
+    """The no_cjk gate judges the deliverable: an output archive with no
+    substantive CJK runs passes even when the report records intermediate
+    ladder attempts (visibility), and any output run fails the gate."""
+    baseline = bench.JobMetrics(
+        name="two-pass",
+        total_tokens=1_000,
+        request_count=10,
+        estimated_cost_usd=1.0,
+        wall_time_seconds=90,
+        expected_blocks=10,
+        translated_blocks=10,
+        group_count=10,
+        valid_archive=True,
+        glossary_checks={"violations": 0},
+    )
+    candidate = bench.JobMetrics(
+        name="one-pass",
+        total_tokens=400,
+        request_count=5,
+        estimated_cost_usd=0.4,
+        wall_time_seconds=60,
+        expected_blocks=10,
+        translated_blocks=10,
+        group_count=10,
+        valid_archive=True,
+        glossary_checks={"violations": 0},
+        # A repaired intermediate CJK issue is recorded for visibility...
+        cjk_remnants=2,
+        # ...but the deliverable shipped clean.
+        output_cjk_count=0,
+    )
+    report = bench.evaluate_gates(baseline, candidate)
+    assert report.gates["no_cjk"]["passed"] is True
+
+    candidate.output_cjk_count = 1
+    no_go = bench.evaluate_gates(baseline, candidate)
+    assert no_go.go is False
+    assert no_go.gates["no_cjk"]["passed"] is False
+
+
 def test_markdown_summary_is_deterministic_and_includes_gate_decision(tmp_path):
     source = tmp_path / "source.epub"
     _write_source(source)

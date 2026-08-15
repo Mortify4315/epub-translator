@@ -362,6 +362,10 @@ class JobMetrics:
     expected_blocks: int = 0
     translated_blocks: int = 0
     cjk_remnants: int = 0
+    # Substantive CJK runs found by scanning the OUTPUT archive (the
+    # deliverable). Distinct from cjk_remnants, which also counts
+    # intermediate ladder attempts that were repaired before shipping.
+    output_cjk_count: int = 0
     source_characters: int = 0
     estimated_cost_usd: float = 0.0
     wall_time_seconds: float = 0.0
@@ -423,6 +427,7 @@ class JobMetrics:
             "expected_blocks": self.expected_blocks,
             "translated_blocks": self.translated_blocks,
             "cjk_remnants": self.cjk_remnants,
+            "output_cjk_count": self.output_cjk_count,
             "source_characters": self.source_characters,
             "estimated_cost_usd": self.estimated_cost_usd,
             "wall_time_seconds": self.wall_time_seconds,
@@ -933,6 +938,7 @@ def _run_job(job: JobSpec, runner: Callable[..., Any]) -> JobRun:
         metrics.translated_blocks = output_analysis["block_count"]
     metrics.empty_count = max(metrics.empty_count, output_analysis["empty_blocks"])
     metrics.cjk_remnants = max(metrics.cjk_remnants, output_analysis["cjk_count"])
+    metrics.output_cjk_count = int(output_analysis["cjk_runs"])
     derived_glossary = check_glossary(job.source_path, job.output_path, job.glossary_dir)
     metrics.glossary_checks = _merge_check_dicts(derived_glossary, metrics.glossary_checks)
     metrics.normalize()
@@ -1063,7 +1069,12 @@ def evaluate_gates(baseline: JobMetrics, candidate: JobMetrics) -> Evaluation:
         0.02,
         "<=",
     )
-    gates["no_cjk"] = _gate(candidate.cjk_remnants == 0, candidate.cjk_remnants, 0, "==")
+    gates["no_cjk"] = _gate(
+        candidate.output_cjk_count == 0,
+        candidate.output_cjk_count,
+        0,
+        "==",
+    )
     gates["no_glossary_regression"] = _gate(
         candidate_glossary <= baseline_glossary,
         {"baseline": baseline_glossary, "candidate": candidate_glossary},
@@ -1497,6 +1508,13 @@ def analyze_epub_text(path: str | Path) -> dict[str, Any]:
     result["block_count"] = len(blocks)
     result["empty_blocks"] = sum(not block.strip() for block in blocks)
     result["cjk_count"] = sum(_is_cjk(character) for character in text)
+    # Substantive remnants: contiguous runs of 2+ CJK characters, the same
+    # rule the one-pass validator applies (a single isolated glyph is
+    # legitimate quoted context, SPEC §9.1).
+    result["cjk_runs"] = len(re.findall(
+        r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff"
+        r"\U00020000-\U0002fa1f]{2,}", text,
+    ))
     return result
 
 
