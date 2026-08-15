@@ -828,13 +828,16 @@ def _translate_one_chapter(
     report: OnePassReport,
     count_tokens,
     group_concurrency: int = 1,
-) -> bool:
+) -> tuple[bool, bool]:
     """Translate a single chapter: flat chapters take the numbered
     protocol, non-flat chapters the chapter-scoped two-pass fallback
     (plan C3) with the strict CJK gate. Runs on a worker thread under
     parallel chapter dispatch, so it never touches the Zip object —
-    the caller reads and writes the archive. Returns True when the
-    chapter body changed and must be written back."""
+    the caller reads and writes the archive. Returns
+    ``(changed, translatable)``: ``changed`` when the chapter body was
+    modified and must be written back; ``translatable`` when the
+    chapter carried text worth translating (False for empty/cover-like
+    pages, which must not consume a chapter_limit slot)."""
     body = find_first(xml.element, "body")
     units, reason = classify_body(body) if body is not None else (None, "no <body> element")
     if units is None:
@@ -848,7 +851,7 @@ def _translate_one_chapter(
             max_retries=max_retries,
             on_protocol_failed=on_protocol_failed,
         ):
-            return False
+            return False, False
         _report_append(report, "legacy_two_pass_chapters", path.as_posix())
         issues = _legacy_cjk_issues(body)
         _record_issues(report, issues)
@@ -891,16 +894,16 @@ def _translate_one_chapter(
                     retried_count=0,
                     over_maximum_retries=True,
                 ))
-        return True
+        return True, True
     if not units:
-        return False
+        return False, False
     return _translate_chapter(
         units, prompt, translation_llm,
         seed=seed, max_group_tokens=max_group_tokens,
         max_retries=max_retries, strict=strict,
         on_protocol_failed=on_protocol_failed, report=report,
         count_tokens=count_tokens, group_concurrency=group_concurrency,
-    )
+    ), True
 
 
 def translate_one_pass(
@@ -1045,12 +1048,16 @@ def translate_one_pass(
             # abort finalization stay in spine order.
             wave_size = max(1, int(group_concurrency or 1))
             pos = 0
+            # chapter_limit counts REAL chapters (those carrying
+            # translatable text); empty/cover-like spine entries are
+            # still processed (migrated as-is) but never consume a slot.
+            real_done = 0
             while pos < len(spine):
-                if limit and report.chapters_done >= limit:
+                if limit and real_done >= limit:
                     raise ChapterLimitReached(limit)
                 take = min(len(spine) - pos, wave_size)
                 if limit:
-                    take = min(take, limit - report.chapters_done)
+                    take = min(take, limit - real_done)
                 wave = spine[pos:pos + take]
                 pos += take
 
@@ -1089,7 +1096,7 @@ def translate_one_pass(
                                     pass
                                 continue
                             try:
-                                changed = future.result()
+                                changed, translatable = future.result()
                             except OnePassProtocolError as exc:
                                 if exc.chapter is None:
                                     exc.chapter = path.as_posix()
@@ -1100,10 +1107,10 @@ def translate_one_pass(
                                 current_path = path
                                 first_error = exc
                                 continue
-                            results.append((path, xml, changed))
+                            results.append((path, xml, changed, translatable))
                 else:
                     for path, xml in loaded:
-                        changed = _translate_one_chapter(
+                        changed, translatable = _translate_one_chapter(
                             path, xml,
                             prompt=prompt, user_prompt=user_prompt,
                             target_language=target_language,
@@ -1114,17 +1121,19 @@ def translate_one_pass(
                             report=report, count_tokens=count_tokens,
                             group_concurrency=group_concurrency,
                         )
-                        results.append((path, xml, changed))
+                        results.append((path, xml, changed, translatable))
 
                 # Write back serially in spine order. Chapters before a
                 # failing one ship even when a strict abort follows
                 # (serial semantics); the failing chapter and its
                 # successors are finalized from the source by Zip.
-                for path, xml, changed in results:
+                for path, xml, changed, translatable in results:
                     if changed:
                         with zip.replace(path) as out:
                             xml.save(out)
                     report.chapters_done += 1
+                    if translatable:
+                        real_done += 1
                     progress += per_chapter
                     if on_progress:
                         on_progress(min(progress, 1.0))

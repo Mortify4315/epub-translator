@@ -1389,6 +1389,33 @@ def test_parallel_chapters_chapter_limit_no_overrun(tmp_path):
     assert "甲乙丙丁戊" in _read_chapter_raw(tgt, "chap4.xhtml")
 
 
+def test_chapter_limit_skips_cover_like_entries(tmp_path):
+    """chapter_limit counts REAL chapters: a cover-like spine entry with
+    no translatable text is processed and migrated but never consumes a
+    limit slot, so the full requested number of chapters translates
+    (the production book has a cover page ahead of its chapters)."""
+    src = tmp_path / "src.epub"
+    tgt = tmp_path / "out.epub"
+    _build_epub(
+        src, [["甲"], ["乙"], ["丙"], ["丁"]], with_nav=False,
+        custom={1: '<div class="cover"><img src="cover.png"/></div>'},
+    )
+    fake = _FakeLLM(handler=_auto_handler("T"))
+    from onepass import ChapterLimitReached
+    with pytest.raises(ChapterLimitReached):
+        translate_one_pass(
+            src, tgt, "en", "prompt", fake,
+            max_group_tokens=5000, max_retries=2, strict=True, chapter_limit=2,
+            group_concurrency=4,
+        )
+    # Cover-like chapter untouched; exactly 2 REAL chapters translated;
+    # the third remains source (limit honored precisely).
+    assert "<img" in _read_chapter_raw(tgt, "chap1.xhtml")
+    assert "T1" in _read_chapter_raw(tgt, "chap2.xhtml")
+    assert "T1" in _read_chapter_raw(tgt, "chap3.xhtml")
+    assert "丁" in _read_chapter_raw(tgt, "chap4.xhtml")
+
+
 def test_parallel_chapters_legacy_mixed_wave(tmp_path):
     """A non-flat chapter inside a parallel wave still takes the
     chapter-scoped two-pass fallback while its flat siblings run the
