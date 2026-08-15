@@ -4,8 +4,11 @@ Replaces the model-driven FILL pass with deterministic paragraph reinsertion
 for structurally flat chapters: eligible chapter bodies are normalized into
 flat ``p``/``h1``-``h6`` units, sent to one translation call as numbered
 groups (``[N] source``), validated against the exact ``1..N`` contract, and
-written back positionally in code. Structurally complex chapters are marked
-legacy-only (the integration layer routes them to the two-pass engine).
+written back positionally in code. Structurally complex chapters are not
+skipped: they are automatically routed through the current two-pass engine
+(chapter-scoped legacy fallback, plan C3) — the same TRANSLATE + FILL
+machinery the production ``translate()`` pipeline uses, applied to this
+chapter's body only. Flat chapters never take the two-pass route.
 
 The numbered protocol, parser, validator, token-aware grouping, and the
 bounded repair ladder are pure and deterministic. LLM transport/cache and
@@ -17,6 +20,7 @@ from __future__ import annotations
 
 import dataclasses
 import difflib
+import importlib.metadata
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,7 +34,10 @@ from epub_translator.epub import (
     write_metadata,
     write_toc,
 )
-from epub_translator.xml import XMLLikeNode, find_first
+from epub_translator.segment import search_text_segments
+from epub_translator.translation.xml_interrupter import XMLInterrupter
+from epub_translator.xml import XMLLikeNode, deduplicate_ids_in_element, find_first
+from epub_translator.xml_translator import SubmitKind, TranslationTask, XMLTranslator
 
 from translate_book import ChapterLimitReached
 
@@ -114,6 +121,11 @@ class OnePassReport:
     cjk_remnants: list[dict] = field(default_factory=list)
     groups: int = 0
     legacy_chapters: list[str] = field(default_factory=list)
+    # Chapters automatically translated by the chapter-scoped two-pass
+    # fallback (plan C3). Subset of legacy_chapters: chapters that were
+    # classified non-flat AND carried translatable text, so the two-pass
+    # engine actually ran on them.
+    legacy_two_pass_chapters: list[str] = field(default_factory=list)
 
 
 class OnePassProtocolError(RuntimeError):
@@ -563,6 +575,82 @@ def _token_counter(llm):
     return lambda text: max(1, len(text) // 2)
 
 
+# ---------------------------------------------------------------------------
+# Chapter-scoped legacy fallback (plan C3)
+# ---------------------------------------------------------------------------
+
+
+def _two_pass_cache_seed(target_language: str) -> str:
+    """Cache seed of the legacy two-pass engine, replicated from
+    ``epub_translator.translation.translator._get_version()`` so the
+    fallback shares the exact same cache identity the production
+    two-pass pipeline uses (``0.1.10:<lang>`` today)."""
+    try:
+        engine_version = importlib.metadata.version("epub-translator")
+    except Exception:  # pragma: no cover - mirrors the engine's own guard
+        engine_version = "development"
+    return f"{engine_version}:{target_language}"
+
+
+def _translate_legacy_chapter(
+    xml,
+    body,
+    *,
+    user_prompt: str,
+    target_language: str,
+    llm,
+    max_group_tokens: int,
+    max_retries: int,
+    on_protocol_failed,
+) -> bool:
+    """Translate one non-flat chapter with the current two-pass engine.
+
+    Applies the exact machinery of the production ``translate()``
+    pipeline — XMLTranslator with REPLACE submission, the MathML/LaTeX
+    interrupter, id deduplication, and the legacy cache seed — scoped to
+    this chapter's ``<body>`` element only. The one-pass API carries a
+    single LLM, so that instance plays both the translate and the fill
+    role (the engine treats them as independent contexts over the same
+    transport and cache).
+
+    Returns True when the two-pass engine ran and the chapter must be
+    written back; False (no-op) when the chapter has no translatable
+    text — the two-pass engine itself cannot process such a chapter and
+    would raise ``RuntimeError`` ("Translation failed unexpectedly").
+    """
+    if body is None:
+        return False
+    if not any(segment.text.strip() for segment in search_text_segments(body)):
+        return False
+
+    interrupter = XMLInterrupter()
+    translator = XMLTranslator(
+        translation_llm=llm,
+        fill_llm=llm,
+        target_language=target_language,
+        user_prompt=user_prompt,
+        ignore_translated_error=False,
+        max_retries=max_retries,
+        max_fill_displaying_errors=10,
+        max_group_score=max_group_tokens,
+        cache_seed_content=_two_pass_cache_seed(target_language),
+    )
+    translator.translate_element(
+        TranslationTask(
+            element=body,
+            action=SubmitKind.REPLACE,
+            payload=body,
+        ),
+        concurrency=1,
+        interrupt_source_text_segments=interrupter.interrupt_source_text_segments,
+        interrupt_translated_text_segments=interrupter.interrupt_translated_text_segments,
+        interrupt_block_element=interrupter.interrupt_block_element,
+        on_fill_failed=on_protocol_failed,
+    )
+    deduplicate_ids_in_element(xml.element)
+    return True
+
+
 def translate_one_pass(
     source_path,
     target_path,
@@ -584,7 +672,9 @@ def translate_one_pass(
     run cleanly: remaining files are finalized into the target archive and
     ChapterLimitReached is raised afterwards, so the partial epub is
     readable. Strict protocol failure behaves the same way but raises
-    OnePassProtocolError (which carries the OnePassReport).
+    OnePassProtocolError (which carries the OnePassReport). Non-flat
+    chapters are automatically translated by the chapter-scoped two-pass
+    fallback (plan C3) instead of being left untranslated.
     """
     source = Path(source_path).resolve()
     target = Path(target_path).resolve()
@@ -690,6 +780,21 @@ def translate_one_pass(
                 units, reason = classify_body(body) if body is not None else (None, "no <body> element")
                 if units is None:
                     report.legacy_chapters.append(path.as_posix())
+                    # Plan C3: non-flat chapters are automatically
+                    # translated by the current two-pass engine, scoped to
+                    # this chapter. Flat chapters never take this route.
+                    if _translate_legacy_chapter(
+                        xml, body,
+                        user_prompt=user_prompt,
+                        target_language=target_language,
+                        llm=translation_llm,
+                        max_group_tokens=max_group_tokens,
+                        max_retries=max_retries,
+                        on_protocol_failed=on_protocol_failed,
+                    ):
+                        report.legacy_two_pass_chapters.append(path.as_posix())
+                        with zip.replace(path) as out:
+                            xml.save(out)
                 elif units:
                     changed = _translate_chapter(
                         units, prompt, translation_llm,
