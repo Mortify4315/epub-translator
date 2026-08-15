@@ -70,5 +70,11 @@ def build_translation_prompt(glossary: dict) -> str:
         lines.extend(f"- {src} => {dst}" for src, dst in glossary.items())
     else:
         lines.append("- (no glossary terms supplied)")
+    lines.append(
+        "Character and place names: transliterate personal names into pinyin, "
+        "and translate meaningful titles and terms into English "
+        "(e.g. 盟主 => \"Alliance Leader\"). Never leave Chinese characters "
+        "in the English output."
+    )
     lines.append("Output only the English translation.")
     return "\n".join(lines)

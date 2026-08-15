@@ -584,3 +584,19 @@ def test_usage_budget_guard_restores_sink_on_exit():
             llm._statistics.submit_usage(
                 types.SimpleNamespace(total_tokens=1, prompt_tokens=1, completion_tokens=0))
     assert same_method(llm._statistics.submit_usage, original)
+
+
+def test_build_translation_prompt_guides_name_handling():
+    """The default prompt must instruct name/term handling so Chinese
+    names (e.g. 盟主乌列, kept by the model in the 100-ch canary) never
+    ship untranslated — the glossary mappings come first, then the
+    name-handling rule."""
+    prompt = job_runner.core.glossary.build_translation_prompt({})
+    assert "no glossary terms supplied" in prompt
+    assert "Never leave Chinese characters" in prompt
+    assert "pinyin" in prompt
+
+    prompt_with_terms = job_runner.core.glossary.build_translation_prompt(
+        {"盟主乌列": "Alliance Leader Uriel"})
+    assert "- 盟主乌列 => Alliance Leader Uriel" in prompt_with_terms
+    assert "Never leave Chinese characters" in prompt_with_terms
