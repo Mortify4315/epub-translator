@@ -507,41 +507,69 @@ def _flat_unit_text(element) -> str | None:
     return "".join(parts)
 
 
-def classify_body(body) -> tuple[list[TranslationUnit] | None, str | None]:
-    """Normalize an eligible chapter body into flat units.
-
-    Eligible: only flat ``p``/``h1``-``h6`` (text plus permitted ``br``) and
-    whitespace. Nested inline elements, tails, tables, links/footnotes/math,
-    raw body text, or any other non-flat structure => (None, reason) and the
-    chapter is legacy-only. Pure-punctuation paragraphs are dropped from the
-    unit list (never sent, never moved). Returns (units, None) with units
-    indexed 1..N in source order.
-    """
-    if body.text is not None and body.text.strip():
-        return None, "raw text node directly in body"
-
-    units: list[TranslationUnit] = []
-    for child in list(body):
+def _collect_flat_children(container, units: list[TranslationUnit]) -> tuple[bool, str | None]:
+    """Collect flat p/h1-h6/br children of ``container`` into ``units``.
+    Returns (True, None) on success or (False, reason) naming the first
+    non-flat structure — the caller then treats the chapter as
+    legacy-only. Mirrors the body-level eligibility rules exactly."""
+    for child in list(container):
         tag = _strip_ns(child.tag)
         if tag in FLAT_TAGS:
             text = _flat_unit_text(child)
             if text is None:
-                return None, f"nested inline markup inside <{tag}>"
+                return False, f"nested inline markup inside <{tag}>"
             if child.tail is not None and child.tail.strip():
-                return None, f"tail text after <{tag}>"
+                return False, f"tail text after <{tag}>"
             if text.strip() and not is_pure_punctuation(text):
                 units.append(TranslationUnit(
                     index=len(units) + 1, source_text=text, target_element=child,
                 ))
         elif tag == "br":
             if child.tail is not None and child.tail.strip():
-                return None, "tail text directly in body"
+                return False, "tail text directly in body"
             continue  # permitted at body level: treated as whitespace
         elif child.tail is not None and child.tail.strip():
-            return None, "tail text directly in body"
+            return False, "tail text directly in body"
         else:
-            return None, f"non-flat element <{tag}>"
+            return False, f"non-flat element <{tag}>"
+    return True, None
 
+
+def classify_body(body) -> tuple[list[TranslationUnit] | None, str | None]:
+    """Normalize an eligible chapter body into flat units.
+
+    Eligible: only flat ``p``/``h1``-``h6`` (text plus permitted ``br``)
+    and whitespace — either directly in the body or inside exactly one
+    transparent wrapper ``<div>`` (a div with no text or tail of its
+    own; the production book and the 5-ch test book both wrap their
+    chapters in ``<div id="chapter">``, which is a pure container and
+    does not make the prose structurally complex). Nested inline
+    elements, tails, tables, links/footnotes/math, raw body text,
+    multiple wrapper divs, or any other non-flat structure =>
+    (None, reason) and the chapter is legacy-only. Pure-punctuation
+    paragraphs are dropped from the unit list (never sent, never moved).
+    Returns (units, None) with units indexed 1..N in source order.
+    """
+    if body.text is not None and body.text.strip():
+        return None, "raw text node directly in body"
+
+    direct_children = [c for c in list(body) if _strip_ns(c.tag) != "br"]
+    if len(direct_children) == 1 and _strip_ns(direct_children[0].tag) == "div":
+        wrapper = direct_children[0]
+        if wrapper.text is not None and wrapper.text.strip():
+            return None, "text directly in wrapper div"
+        if wrapper.tail is not None and wrapper.tail.strip():
+            return None, "tail text after wrapper div"
+        units: list[TranslationUnit] = []
+        ok, reason = _collect_flat_children(wrapper, units)
+        if not ok:
+            return None, reason
+        return units, None
+
+    units = []
+    ok, reason = _collect_flat_children(body, units)
+    if not ok:
+        return None, reason
     return units, None
 
 

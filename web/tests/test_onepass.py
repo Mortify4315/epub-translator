@@ -663,6 +663,65 @@ def test_pure_punctuation_filtered_out():
     assert [u.index for u in units] == [1]
 
 
+def test_transparent_wrapper_div_eligible():
+    """The production book wraps each chapter in `<div id="chapter">`; a
+    single transparent wrapper div (no text or tail of its own) does not
+    make the body structurally complex — units come from inside it."""
+    body = _body('<div id="chapter"><h1>第一章</h1><p>正文一</p><p>正文二</p></div>')
+    units, reason = classify_body(body)
+    assert reason is None
+    assert [u.source_text for u in units] == ["第一章", "正文一", "正文二"]
+    assert [u.target_element.tag for u in units] == ["h1", "p", "p"]
+
+
+def test_wrapper_div_with_own_text_legacy():
+    body = _body('<div id="chapter">raw text<p>正文</p></div>')
+    units, reason = classify_body(body)
+    assert units is None and "div" in reason
+
+
+def test_wrapper_div_with_tail_legacy():
+    body = _body('<div id="chapter"><p>正文</p></div> stray tail')
+    units, reason = classify_body(body)
+    assert units is None and "tail" in reason
+
+
+def test_wrapper_div_nested_legacy():
+    body = _body('<div id="chapter"><div><p>正文</p></div></div>')
+    units, reason = classify_body(body)
+    assert units is None
+
+
+def test_two_wrapper_divs_legacy():
+    body = _body('<div id="a"><p>正文一</p></div><div id="b"><p>正文二</p></div>')
+    units, reason = classify_body(body)
+    assert units is None and "div" in reason
+
+
+def test_translate_one_pass_wrapper_div_chapter(tmp_path):
+    """End-to-end: a chapter wrapped in `<div id="chapter">` (the real
+    book's shape) is translated by the numbered protocol — not routed to
+    the legacy fallback — and the wrapper div survives in the output."""
+    src = tmp_path / "src.epub"
+    tgt = tmp_path / "out.epub"
+    _build_epub(
+        src, [["正文一", "正文二"]], with_nav=False,
+        custom={1: '<div id="chapter"><h1>第一章</h1><p>正文一</p><p>正文二</p></div>'},
+    )
+    fake = _FakeLLM(handler=_auto_handler("T"))
+    report = translate_one_pass(
+        src, tgt, "en", "prompt", fake,
+        max_group_tokens=5000, max_retries=2, strict=True, chapter_limit=0,
+    )
+    assert report.legacy_chapters == []
+    assert report.legacy_two_pass_chapters == []
+    assert report.translated_units == 3
+    content = _read_chapter_raw(tgt, "chap1.xhtml")
+    assert '<div id="chapter">' in content
+    assert "T1" in content and "T2" in content and "T3" in content
+    assert "正文一" not in content and "第一章" not in content
+
+
 def test_reinsertion_alters_text_only_preserves_attributes():
     body = _body('<p id="para-1" class="prose">原文</p><h2 data-x="1">标题</h2>')
     units, _ = classify_body(body)
