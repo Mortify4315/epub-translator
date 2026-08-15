@@ -1,4 +1,5 @@
 import argparse
+import importlib
 import json
 import shutil
 import time
@@ -24,13 +25,19 @@ from config import (
     get_max_group_tokens,
     get_max_retries,
     get_model,
+    get_pipeline,
     get_provider,
     get_provider_info,
     get_retry_times,
+    get_strict_one_pass,
     get_token_budget,
     validate_ready,
 )
 from glossary import book_key, build_translation_prompt, merge_glossaries
+
+
+ONE_PASS_PIPELINE_VERSION = "one-pass-v1"
+ONE_PASS_PROTOCOL_VERSION = 1
 
 
 class BudgetExceeded(RuntimeError):
@@ -137,18 +144,87 @@ def estimate(source_path: Path) -> dict:
     input_tokens = int(tokens * 0.46)
     output_tokens = int(tokens * 0.54)
     cost = estimate_cost(input_tokens, output_tokens)
-    return {"chapters": chapters, "chars": total_chars, "tokens": tokens, "cost": cost}
-
-
-def _cache_config() -> dict:
+    pipeline = get_pipeline()
     return {
-        "provider": get_provider(),
-        "base_url": get_base_url(),
-        "thinking": get_extra_body().get("thinking", {}).get("type", "none"),
-        "fill_thinking": get_fill_thinking(),
-        "model": get_model(),
-        "max_group_tokens": get_max_group_tokens(),
+        "chapters": chapters,
+        "chars": total_chars,
+        "tokens": tokens,
+        "cost": cost,
+        "pipeline": pipeline,
+        # The calibrated constants above cover two-pass only. The UI must not
+        # present this reused figure as a measured one-pass prediction.
+        "cost_experimental": pipeline == "one-pass",
     }
+
+
+def _cache_config(settings=None) -> dict:
+    provider = settings.get_provider() if settings else get_provider()
+    base_url = settings.get_base_url() if settings else get_base_url()
+    extra_body = settings.get_extra_body() if settings else get_extra_body()
+    fill_thinking = settings.get_fill_thinking() if settings else get_fill_thinking()
+    model = settings.get_model() if settings else get_model()
+    max_group_tokens = (settings.get_max_group_tokens() if settings
+                        else get_max_group_tokens())
+    return {
+        "provider": provider,
+        "base_url": base_url,
+        "thinking": extra_body.get("thinking", {}).get("type", "none"),
+        "fill_thinking": fill_thinking,
+        "model": model,
+        "max_group_tokens": max_group_tokens,
+    }
+
+
+def one_pass_cache_config(prompt: str, settings=None) -> dict:
+    """Cache identity for the deterministic numbered-paragraph protocol.
+
+    This marker intentionally lives inside the one-pass namespace, leaving
+    legacy cache/<book-key>/ entries untouched while a user benchmarks it.
+    """
+    provider = settings.get_provider() if settings else get_provider()
+    base_url = settings.get_base_url() if settings else get_base_url()
+    model = settings.get_model() if settings else get_model()
+    extra_body = settings.get_extra_body() if settings else get_extra_body()
+    max_group_tokens = (settings.get_max_group_tokens() if settings
+                        else get_max_group_tokens())
+    return {
+        "pipeline": ONE_PASS_PIPELINE_VERSION,
+        "protocol_version": ONE_PASS_PROTOCOL_VERSION,
+        "provider": provider,
+        "base_url": base_url,
+        "model": model,
+        "target_language": language.ENGLISH,
+        "glossary_prompt": prompt,
+        "thinking": extra_body.get("thinking", {}).get("type", "none"),
+        "max_group_tokens": max_group_tokens,
+    }
+
+
+def cache_path_for_pipeline(key: str, pipeline: str, cache_dir: Path | None = None) -> Path:
+    legacy_path = (cache_dir or CACHE_DIR) / key
+    if pipeline == "one-pass":
+        return legacy_path / "pipelines" / ONE_PASS_PIPELINE_VERSION
+    return legacy_path
+
+
+def _clear_pipeline_cache(cache_path: Path, pipeline: str) -> None:
+    """Clear only the selected pipeline's entries.
+
+    Two-pass deliberately remains at the legacy book-cache root, while
+    one-pass lives below its ``pipelines/`` child. Clearing that root wholesale
+    would erase the sibling one-pass cache, so preserve all pipeline
+    namespaces and delete only root-level legacy files/directories.
+    """
+    if pipeline == "one-pass":
+        shutil.rmtree(cache_path, ignore_errors=True)
+        return
+    for entry in cache_path.iterdir():
+        if entry.name == "pipelines" and entry.is_dir():
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            entry.unlink(missing_ok=True)
 
 
 def _ensure_cache_matches_config(cache_path: Path, config: dict) -> bool:
@@ -160,6 +236,34 @@ def _ensure_cache_matches_config(cache_path: Path, config: dict) -> bool:
         return False
 
 
+def prepare_pipeline_cache(key: str, pipeline: str, prompt: str,
+                           cache_dir: Path | None = None, settings=None) -> tuple[Path, bool]:
+    """Prepare only the selected pipeline's cache. A mismatch invalidates that
+    pipeline, never its sibling (especially the legacy two-pass cache)."""
+    cache_path = cache_path_for_pipeline(key, pipeline, cache_dir=cache_dir)
+    config = (one_pass_cache_config(prompt, settings=settings) if pipeline == "one-pass"
+              else _cache_config(settings=settings))
+    cache_cleared = False
+    if cache_path.exists() and not _ensure_cache_matches_config(cache_path, config):
+        _clear_pipeline_cache(cache_path, pipeline)
+        cache_cleared = True
+    cache_path.mkdir(parents=True, exist_ok=True)
+    (cache_path / "config.json").write_text(
+        json.dumps(config, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    return cache_path, cache_cleared
+
+
+def load_one_pass_translator():
+    """Deferred import keeps the default two-pass implementation usable while
+    integration is merged before the one-pass core module."""
+    try:
+        return importlib.import_module("onepass").translate_one_pass
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError(
+            "One-pass translation is selected, but cli/onepass.py is unavailable. "
+            "Merge the one-pass core implementation or select two-pass.") from exc
+
+
 def run_translation(source_path: Path, on_progress=None) -> dict:
     problems = validate_ready()
     if problems:
@@ -168,21 +272,10 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
     key = book_key(source_path.name)
     glossary = merge_glossaries(key)
     prompt = build_translation_prompt(glossary)
+    pipeline = get_pipeline()
     target_path = OUT_DIR / f"{source_path.stem}.en.epub"
-    cache_path = CACHE_DIR / key
     source_for_translation = prepare_epub(source_path, CACHE_DIR / "prep")
-    budget = get_token_budget(source_path.name)
-
-    config = _cache_config()
-    cache_cleared = False
-    if cache_path.exists():
-        if not _ensure_cache_matches_config(cache_path, config):
-            shutil.rmtree(cache_path, ignore_errors=True)
-            cache_cleared = True
-    cache_path.mkdir(parents=True, exist_ok=True)
-    (cache_path / "config.json").write_text(
-        json.dumps(config, ensure_ascii=False, sort_keys=True), encoding="utf-8"
-    )
+    cache_path, cache_cleared = prepare_pipeline_cache(key, pipeline, prompt)
 
     def make_llm(extra_body: dict) -> LLM:
         return LLM(
@@ -198,7 +291,7 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
         )
 
     translation_llm = make_llm(get_extra_body())
-    fill_llm = make_llm(get_fill_extra_body())
+    fill_llm = make_llm(get_fill_extra_body()) if pipeline == "two-pass" else None
 
     est = estimate(source_path)
     headers = count_headers(source_for_translation)
@@ -206,7 +299,7 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
     budget = get_token_budget(source_path.name)
 
     def budget_aware_progress(frac: float) -> None:
-        used = translation_llm.total_tokens + fill_llm.total_tokens
+        used = translation_llm.total_tokens + (fill_llm.total_tokens if fill_llm else 0)
         if used > budget:
             raise BudgetExceeded(budget, used)
         if on_progress:
@@ -217,19 +310,33 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
 
     chapter_limited = False
     try:
-        translate(
-            source_path=str(source_for_translation),
-            target_path=str(target_path),
-            target_language=language.ENGLISH,
-            submit=SubmitKind.REPLACE,
-            user_prompt=prompt,
-            max_retries=get_max_retries(),
-            translation_llm=translation_llm,
-            fill_llm=fill_llm,
-            concurrency=get_concurrency(),
-            max_group_tokens=get_max_group_tokens(),
-            on_progress=on_chapter_progress,
-        )
+        if pipeline == "one-pass":
+            load_one_pass_translator()(
+                source_path=str(source_for_translation),
+                target_path=str(target_path),
+                target_language=language.ENGLISH,
+                user_prompt=prompt,
+                translation_llm=translation_llm,
+                max_group_tokens=get_max_group_tokens(),
+                max_retries=get_max_retries(),
+                strict=get_strict_one_pass(),
+                chapter_limit=chapter_limit,
+                on_progress=on_chapter_progress,
+            )
+        else:
+            translate(
+                source_path=str(source_for_translation),
+                target_path=str(target_path),
+                target_language=language.ENGLISH,
+                submit=SubmitKind.REPLACE,
+                user_prompt=prompt,
+                max_retries=get_max_retries(),
+                translation_llm=translation_llm,
+                fill_llm=fill_llm,
+                concurrency=get_concurrency(),
+                max_group_tokens=get_max_group_tokens(),
+                on_progress=on_chapter_progress,
+            )
     except BudgetExceeded:
         target_path.unlink(missing_ok=True)
         raise
@@ -237,15 +344,21 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
         # Partial output is intentional (batch mode): keep the finalized epub.
         chapter_limited = True
 
-    input_tokens = translation_llm.input_tokens + fill_llm.input_tokens
-    output_tokens = translation_llm.output_tokens + fill_llm.output_tokens
+    input_tokens = translation_llm.input_tokens + (fill_llm.input_tokens if fill_llm else 0)
+    output_tokens = translation_llm.output_tokens + (fill_llm.output_tokens if fill_llm else 0)
+    cached_input_tokens = (getattr(translation_llm, "input_cache_tokens", 0)
+                           + (getattr(fill_llm, "input_cache_tokens", 0) if fill_llm else 0))
     return {
         "target": target_path,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "cost": estimate_cost(input_tokens, output_tokens),
+        "cached_input_tokens": cached_input_tokens,
+        "cost": estimate_cost(input_tokens, output_tokens,
+                              cached_input_tokens=cached_input_tokens),
         "cache_cleared": cache_cleared,
         "chapter_limited": chapter_limited,
+        "pipeline": pipeline,
+        "cost_experimental": pipeline == "one-pass",
     }
 
 

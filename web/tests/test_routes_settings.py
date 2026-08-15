@@ -124,3 +124,18 @@ def test_settings_chapter_limit_roundtrip(client, sandbox):
     resp = client.post("/api/settings", json={"chapter_limit": 0})
     assert resp.status_code == 200
     assert resp.get_json()["chapter_limit"] == 0
+
+
+def test_settings_one_pass_pipeline_and_strict_mode_roundtrip(client, sandbox):
+    resp = client.post("/api/settings", json={
+        "pipeline": "one-pass", "strict_one_pass": True})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["pipeline"] == "one-pass"
+    assert data["strict_one_pass"] is True
+    assert client.get("/api/settings").get_json()["pipeline"] == "one-pass"
+
+
+def test_settings_rejects_invalid_pipeline_and_non_boolean_strict_mode(client, sandbox):
+    assert client.post("/api/settings", json={"pipeline": "experimental"}).status_code == 400
+    assert client.post("/api/settings", json={"strict_one_pass": "true"}).status_code == 400
