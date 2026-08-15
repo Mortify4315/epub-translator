@@ -1229,3 +1229,117 @@ def test_parallel_strict_abort_propagates_and_drains(tmp_path):
     assert err.value.report.cjk_remnants == []
     # The aborted chapter was never written as translated: source stays.
     assert "甲乙丙丁" in _read_chapter_raw(tgt, "chap1.xhtml")
+
+
+def test_parallel_chapters_dispatched_concurrently(tmp_path):
+    """group_concurrency>1 dispatches whole chapters in waves: with one
+    group per chapter, three chapters translate concurrently (the probe
+    observes >=2 simultaneous requests) and each chapter is written back
+    translated in spine order."""
+    src = tmp_path / "src.epub"
+    tgt = tmp_path / "out.epub"
+    _build_epub(src, [["甲乙丙丁"], ["甲乙丙丁戊"], ["甲乙丙丁戊己"]], with_nav=False)
+    handler, state = _probe_handler(_length_handler("G"))
+    fake = _FakeLLM(handler=handler)
+    report = translate_one_pass(
+        src, tgt, "en", "prompt", fake,
+        max_group_tokens=5000, max_retries=2, strict=True, chapter_limit=0,
+        group_concurrency=3,
+    )
+    assert state["max_in_flight"] >= 2
+    assert report.chapters_done == 3
+    assert report.groups == 3
+    assert report.translated_units == 3
+    for i, marker in enumerate(["G4", "G5", "G6"], 1):
+        content = _read_chapter_raw(tgt, f"chap{i}.xhtml")
+        assert re.findall(r"<p>(.*?)</p>", content) == [marker]
+
+
+def test_parallel_chapters_progress_in_spine_order(tmp_path):
+    """Parallel chapter dispatch keeps progress monotonic and in spine
+    order — write-backs never race ahead of earlier chapters."""
+    src = tmp_path / "src.epub"
+    tgt = tmp_path / "out.epub"
+    _build_epub(src, [["甲"], ["乙"], ["丙"]], with_nav=False)
+    fake = _FakeLLM(handler=_auto_handler("T"))
+    progress = []
+    report = translate_one_pass(
+        src, tgt, "en", "prompt", fake,
+        max_group_tokens=5000, max_retries=2, strict=True, chapter_limit=0,
+        group_concurrency=3, on_progress=progress.append,
+    )
+    assert report.chapters_done == 3
+    # Metadata 5%, then 95%/3 per chapter.
+    assert progress == pytest.approx([0.05, 0.05 + 0.95 / 3, 0.05 + 2 * 0.95 / 3, 1.0])
+
+
+def test_parallel_chapters_strict_abort_mid_wave(tmp_path):
+    """A strict protocol failure in chapter 2 of a 3-chapter wave: chapter
+    1 ships translated, chapters 2-3 keep their source, the error names
+    the failing chapter, and the executor drains without deadlock."""
+    src = tmp_path / "src.epub"
+    tgt = tmp_path / "out.epub"
+    _build_epub(src, [["甲乙"], ["甲乙丙"], ["甲乙丙丁"]], with_nav=False)
+
+    def handler(prompt):
+        if "测试书名" in prompt:
+            return _auto_handler("T")(prompt)
+        if "甲乙丙" in prompt:
+            return "Sorry, I cannot help with that."
+        return _auto_handler("T")(prompt)
+
+    fake = _FakeLLM(handler=handler)
+    with pytest.raises(OnePassProtocolError) as err:
+        translate_one_pass(
+            src, tgt, "en", "prompt", fake,
+            max_group_tokens=5000, max_retries=2, strict=True, chapter_limit=0,
+            group_concurrency=3,
+        )
+    assert err.value.chapter is not None and err.value.chapter.endswith("chap2.xhtml")
+    assert "T1" in _read_chapter_raw(tgt, "chap1.xhtml")
+    assert "甲乙丙" in _read_chapter_raw(tgt, "chap2.xhtml")
+    assert "甲乙丙丁" in _read_chapter_raw(tgt, "chap3.xhtml")
+
+
+def test_parallel_chapters_chapter_limit_no_overrun(tmp_path):
+    """chapter_limit with parallel dispatch translates exactly `limit`
+    chapters — no wasted wave work — and finalizes the partial epub with
+    the remaining chapters copied from the source."""
+    src = tmp_path / "src.epub"
+    tgt = tmp_path / "out.epub"
+    _build_epub(src, [["甲乙"], ["甲乙丙"], ["甲乙丙丁"], ["甲乙丙丁戊"]], with_nav=False)
+    fake = _FakeLLM(handler=_auto_handler("T"))
+    from onepass import ChapterLimitReached
+    with pytest.raises(ChapterLimitReached):
+        translate_one_pass(
+            src, tgt, "en", "prompt", fake,
+            max_group_tokens=5000, max_retries=2, strict=True, chapter_limit=2,
+            group_concurrency=4,
+        )
+    assert "T1" in _read_chapter_raw(tgt, "chap1.xhtml")
+    assert "T1" in _read_chapter_raw(tgt, "chap2.xhtml")
+    assert "甲乙丙丁" in _read_chapter_raw(tgt, "chap3.xhtml")
+    assert "甲乙丙丁戊" in _read_chapter_raw(tgt, "chap4.xhtml")
+
+
+def test_parallel_chapters_legacy_mixed_wave(tmp_path):
+    """A non-flat chapter inside a parallel wave still takes the
+    chapter-scoped two-pass fallback while its flat siblings run the
+    numbered protocol."""
+    src = tmp_path / "src.epub"
+    tgt = tmp_path / "out.epub"
+    _build_epub(src, [["flat一"], ["嵌套二"]], nested=[2], with_nav=False)
+    fake = _FakeLLM(handler=_legacy_mixed_handler("L"))
+    report = translate_one_pass(
+        src, tgt, "en", "prompt", fake,
+        max_group_tokens=5000, max_retries=2, strict=True, chapter_limit=0,
+        group_concurrency=2,
+    )
+    assert len(report.legacy_two_pass_chapters) == 1
+    assert report.legacy_two_pass_chapters[0].endswith("chap2.xhtml")
+    assert report.chapters_done == 2
+    flat = _read_chapter_raw(tgt, "chap1.xhtml")
+    assert "T1" in flat and "flat一" not in flat
+    assert "L" not in flat
+    legacy = _read_chapter_raw(tgt, "chap2.xhtml")
+    assert "L" in legacy and "嵌套" not in legacy

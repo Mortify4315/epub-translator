@@ -779,6 +779,97 @@ def _legacy_cjk_issues(body) -> list[UnitIssue]:
     return issues
 
 
+def _translate_one_chapter(
+    path,
+    xml,
+    *,
+    prompt: str,
+    user_prompt: str,
+    target_language: str,
+    translation_llm,
+    seed: str,
+    max_group_tokens: int,
+    max_retries: int,
+    strict: bool,
+    on_protocol_failed,
+    report: OnePassReport,
+    count_tokens,
+    group_concurrency: int = 1,
+) -> bool:
+    """Translate a single chapter: flat chapters take the numbered
+    protocol, non-flat chapters the chapter-scoped two-pass fallback
+    (plan C3) with the strict CJK gate. Runs on a worker thread under
+    parallel chapter dispatch, so it never touches the Zip object —
+    the caller reads and writes the archive. Returns True when the
+    chapter body changed and must be written back."""
+    body = find_first(xml.element, "body")
+    units, reason = classify_body(body) if body is not None else (None, "no <body> element")
+    if units is None:
+        _report_append(report, "legacy_chapters", path.as_posix())
+        if not _translate_legacy_chapter(
+            xml, body,
+            user_prompt=user_prompt,
+            target_language=target_language,
+            llm=translation_llm,
+            max_group_tokens=max_group_tokens,
+            max_retries=max_retries,
+            on_protocol_failed=on_protocol_failed,
+        ):
+            return False
+        _report_append(report, "legacy_two_pass_chapters", path.as_posix())
+        issues = _legacy_cjk_issues(body)
+        _record_issues(report, issues)
+        if issues and strict:
+            # Bounded reroute: one corrective re-run of the chapter's
+            # two-pass engine with an explicit no-source-copy directive
+            # (the appended remedy changes the messages hash, busting the
+            # chapter's cache keys so the retry is a fresh call), then
+            # re-scan.
+            if _translate_legacy_chapter(
+                xml, body,
+                user_prompt=user_prompt + "\n\n" + _LEGACY_REMEDY,
+                target_language=target_language,
+                llm=translation_llm,
+                max_group_tokens=max_group_tokens,
+                max_retries=max_retries,
+                on_protocol_failed=on_protocol_failed,
+            ):
+                issues = _legacy_cjk_issues(body)
+                _record_issues(report, issues)
+        if issues:
+            message = (
+                f"{len(issues)} segment(s) still contain untranslated "
+                f"CJK after the two-pass fallback"
+            )
+            _report_append(report, "failures", {
+                "index": 0,
+                "kinds": ["cjk"],
+                "message": message,
+            })
+            if strict:
+                raise OnePassProtocolError(
+                    "two-pass fallback left substantive CJK remnants in "
+                    f"{path.as_posix()}: {message}",
+                    report=report,
+                )
+            if on_protocol_failed is not None:
+                on_protocol_failed(FillFailedEvent(
+                    error_message=message,
+                    retried_count=0,
+                    over_maximum_retries=True,
+                ))
+        return True
+    if not units:
+        return False
+    return _translate_chapter(
+        units, prompt, translation_llm,
+        seed=seed, max_group_tokens=max_group_tokens,
+        max_retries=max_retries, strict=strict,
+        on_protocol_failed=on_protocol_failed, report=report,
+        count_tokens=count_tokens, group_concurrency=group_concurrency,
+    )
+
+
 def translate_one_pass(
     source_path,
     target_path,
@@ -809,12 +900,15 @@ def translate_one_pass(
     with OnePassProtocolError, and in non-strict mode the remnants are
     recorded in the report and surfaced through on_protocol_failed.
 
-    ``group_concurrency`` (default 1, serial) bounds parallel group
-    dispatch within each chapter: groups are independent numbered
-    requests, so the same concurrency the two-pass engine uses applies
-    here without changing the protocol, the repair ladder, or positional
-    reinsertion. Callers that already know the configured engine
-    concurrency (cli/config, the benchmark harness) pass it explicitly.
+    ``group_concurrency`` (default 1, serial) bounds parallel dispatch:
+    within each chapter, groups are independent numbered requests, and
+    whole chapters are dispatched in waves of `group_concurrency` —
+    the same concurrency model the two-pass engine uses. Reads and
+    writes of the archive stay on the calling thread (spine order,
+    deterministic progress), so the protocol, the repair ladder, and
+    positional reinsertion are unchanged. Callers that already know
+    the configured engine concurrency (cli/config, the benchmark
+    harness) pass it explicitly.
     """
     source = Path(source_path).resolve()
     target = Path(target_path).resolve()
@@ -910,88 +1004,99 @@ def translate_one_pass(
                     on_progress(progress)
 
             # --- chapters ---
-            for path, media_type in spine:
+            # Wave-based dispatch: chapters are read and written by this
+            # (main) thread — the Zip object is not thread-safe — while
+            # translation runs on worker threads (LLM calls only). Waves
+            # of `group_concurrency` chapters bound memory for the full
+            # book; write-back, progress, chapter-limit accounting, and
+            # abort finalization stay in spine order.
+            wave_size = max(1, int(group_concurrency or 1))
+            pos = 0
+            while pos < len(spine):
                 if limit and report.chapters_done >= limit:
                     raise ChapterLimitReached(limit)
-                current_path = path
-                with zip.read(path) as f:
-                    xml = XMLLikeNode(f, is_html_like=(media_type == "text/html"))
-                body = find_first(xml.element, "body")
-                units, reason = classify_body(body) if body is not None else (None, "no <body> element")
-                if units is None:
-                    report.legacy_chapters.append(path.as_posix())
-                    # Plan C3: non-flat chapters are automatically
-                    # translated by the current two-pass engine, scoped to
-                    # this chapter. Flat chapters never take this route.
-                    if _translate_legacy_chapter(
-                        xml, body,
-                        user_prompt=user_prompt,
-                        target_language=target_language,
-                        llm=translation_llm,
-                        max_group_tokens=max_group_tokens,
-                        max_retries=max_retries,
-                        on_protocol_failed=on_protocol_failed,
-                    ):
-                        report.legacy_two_pass_chapters.append(path.as_posix())
-                        issues = _legacy_cjk_issues(body)
-                        _record_issues(report, issues)
-                        if issues and strict:
-                            # Bounded reroute: one corrective re-run of the
-                            # chapter's two-pass engine with an explicit
-                            # no-source-copy directive (busts the chapter's
-                            # cache keys so the retry is a fresh call),
-                            # then re-scan.
-                            if _translate_legacy_chapter(
-                                xml, body,
-                                user_prompt=user_prompt + "\n\n" + _LEGACY_REMEDY,
+                take = min(len(spine) - pos, wave_size)
+                if limit:
+                    take = min(take, limit - report.chapters_done)
+                wave = spine[pos:pos + take]
+                pos += take
+
+                # Read the wave serially (zipfile is not thread-safe).
+                loaded = []
+                for path, media_type in wave:
+                    with zip.read(path) as f:
+                        xml = XMLLikeNode(f, is_html_like=(media_type == "text/html"))
+                    loaded.append((path, xml))
+
+                # Translate the wave concurrently.
+                results = []
+                first_error: BaseException | None = None
+                if wave_size > 1 and len(loaded) > 1:
+                    with ThreadPoolExecutor(max_workers=wave_size) as pool:
+                        jobs = [
+                            (path, xml, pool.submit(
+                                _translate_one_chapter,
+                                path, xml,
+                                prompt=prompt, user_prompt=user_prompt,
                                 target_language=target_language,
-                                llm=translation_llm,
-                                max_group_tokens=max_group_tokens,
-                                max_retries=max_retries,
+                                translation_llm=translation_llm,
+                                seed=seed, max_group_tokens=max_group_tokens,
+                                max_retries=max_retries, strict=strict,
                                 on_protocol_failed=on_protocol_failed,
-                            ):
-                                issues = _legacy_cjk_issues(body)
-                                _record_issues(report, issues)
-                        if issues:
-                            message = (
-                                f"{len(issues)} segment(s) still contain untranslated "
-                                f"CJK after the two-pass fallback"
-                            )
-                            report.failures.append({
-                                "index": 0,
-                                "kinds": ["cjk"],
-                                "message": message,
-                            })
-                            if strict:
-                                raise OnePassProtocolError(
-                                    "two-pass fallback left substantive CJK remnants in "
-                                    f"{path.as_posix()}: {message}",
-                                    report=report,
-                                )
-                            if on_protocol_failed is not None:
-                                on_protocol_failed(FillFailedEvent(
-                                    error_message=message,
-                                    retried_count=0,
-                                    over_maximum_retries=True,
-                                ))
-                        with zip.replace(path) as out:
-                            xml.save(out)
-                elif units:
-                    changed = _translate_chapter(
-                        units, prompt, translation_llm,
-                        seed=seed, max_group_tokens=max_group_tokens,
-                        max_retries=max_retries, strict=strict,
-                        on_protocol_failed=on_protocol_failed, report=report,
-                        count_tokens=count_tokens,
-                        group_concurrency=group_concurrency,
-                    )
+                                report=report, count_tokens=count_tokens,
+                                group_concurrency=group_concurrency,
+                            ))
+                            for path, xml in loaded
+                        ]
+                        for path, xml, future in jobs:
+                            if first_error is not None:
+                                try:
+                                    future.result()
+                                except BaseException:  # noqa: BLE001 - drain only
+                                    pass
+                                continue
+                            try:
+                                changed = future.result()
+                            except OnePassProtocolError as exc:
+                                if exc.chapter is None:
+                                    exc.chapter = path.as_posix()
+                                current_path = path
+                                first_error = exc
+                                continue
+                            except BaseException as exc:  # noqa: BLE001 - re-raise after drain
+                                current_path = path
+                                first_error = exc
+                                continue
+                            results.append((path, xml, changed))
+                else:
+                    for path, xml in loaded:
+                        changed = _translate_one_chapter(
+                            path, xml,
+                            prompt=prompt, user_prompt=user_prompt,
+                            target_language=target_language,
+                            translation_llm=translation_llm,
+                            seed=seed, max_group_tokens=max_group_tokens,
+                            max_retries=max_retries, strict=strict,
+                            on_protocol_failed=on_protocol_failed,
+                            report=report, count_tokens=count_tokens,
+                            group_concurrency=group_concurrency,
+                        )
+                        results.append((path, xml, changed))
+
+                # Write back serially in spine order. Chapters before a
+                # failing one ship even when a strict abort follows
+                # (serial semantics); the failing chapter and its
+                # successors are finalized from the source by Zip.
+                for path, xml, changed in results:
                     if changed:
                         with zip.replace(path) as out:
                             xml.save(out)
-                report.chapters_done += 1
-                progress += per_chapter
-                if on_progress:
-                    on_progress(min(progress, 1.0))
+                    report.chapters_done += 1
+                    progress += per_chapter
+                    if on_progress:
+                        on_progress(min(progress, 1.0))
+                if first_error is not None:
+                    raise first_error
         except (ChapterLimitReached, OnePassProtocolError) as exc:
             if isinstance(exc, OnePassProtocolError) and exc.chapter is None and current_path is not None:
                 exc.chapter = current_path.as_posix()
