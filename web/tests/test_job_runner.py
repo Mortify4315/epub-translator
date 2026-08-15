@@ -290,6 +290,26 @@ def test_one_pass_marker_mismatch_only_clears_one_pass_namespace(monkeypatch, tm
     assert not (onepass_cache / "stale-entry").exists()
 
 
+def test_two_pass_marker_mismatch_preserves_one_pass_namespace(tmp_path):
+    """Changing a legacy marker must not rmtree the nested one-pass cache."""
+    cache = tmp_path / "cache"
+    legacy_cache = cache / "book"
+    onepass_cache = legacy_cache / "pipelines" / "one-pass-v1"
+    onepass_cache.mkdir(parents=True)
+    (onepass_cache / "cached-response").write_text("keep", encoding="utf-8")
+    (legacy_cache / "config.json").write_text('{"obsolete": true}', encoding="utf-8")
+    (legacy_cache / "legacy-response").write_text("discard", encoding="utf-8")
+
+    cache_path, cache_cleared = job_runner.core.translate_book.prepare_pipeline_cache(
+        "book", "two-pass", "translate", cache_dir=cache)
+
+    assert cache_cleared is True
+    assert cache_path == legacy_cache
+    assert (onepass_cache / "cached-response").read_text(encoding="utf-8") == "keep"
+    assert not (legacy_cache / "legacy-response").exists()
+    assert (legacy_cache / "config.json").is_file()
+
+
 def test_core_run_translation_dispatches_one_pass_with_its_fixed_contract(monkeypatch, tmp_path):
     core = job_runner.core.translate_book
     source = tmp_path / "book.epub"

@@ -207,6 +207,26 @@ def cache_path_for_pipeline(key: str, pipeline: str, cache_dir: Path | None = No
     return legacy_path
 
 
+def _clear_pipeline_cache(cache_path: Path, pipeline: str) -> None:
+    """Clear only the selected pipeline's entries.
+
+    Two-pass deliberately remains at the legacy book-cache root, while
+    one-pass lives below its ``pipelines/`` child. Clearing that root wholesale
+    would erase the sibling one-pass cache, so preserve all pipeline
+    namespaces and delete only root-level legacy files/directories.
+    """
+    if pipeline == "one-pass":
+        shutil.rmtree(cache_path, ignore_errors=True)
+        return
+    for entry in cache_path.iterdir():
+        if entry.name == "pipelines" and entry.is_dir():
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            entry.unlink(missing_ok=True)
+
+
 def _ensure_cache_matches_config(cache_path: Path, config: dict) -> bool:
     marker = cache_path / "config.json"
     try:
@@ -225,7 +245,7 @@ def prepare_pipeline_cache(key: str, pipeline: str, prompt: str,
               else _cache_config(settings=settings))
     cache_cleared = False
     if cache_path.exists() and not _ensure_cache_matches_config(cache_path, config):
-        shutil.rmtree(cache_path, ignore_errors=True)
+        _clear_pipeline_cache(cache_path, pipeline)
         cache_cleared = True
     cache_path.mkdir(parents=True, exist_ok=True)
     (cache_path / "config.json").write_text(
