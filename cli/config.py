@@ -18,7 +18,7 @@ TOKEN_BUDGET_DEFAULT = 1_500_000
 TOKEN_BUDGET_TEST_DEFAULT = 500_000
 MAX_RETRIES_DEFAULT = 2
 RETRY_TIMES_DEFAULT = 2
-PIPELINE_DEFAULT = "two-pass"
+PIPELINE_DEFAULT = "one-pass"
 PIPELINES = ("two-pass", "one-pass")
 
 DEFAULT_PROVIDER = "deepseek"
@@ -390,7 +390,7 @@ def get_chapter_limit() -> int:
 
 def get_pipeline() -> str:
     """Selected translation implementation. Invalid persisted values safely
-    fall back to the compatible two-pass engine without rewriting settings."""
+    fall back to the one-pass engine without rewriting settings."""
     pipeline = str(load_settings().get("pipeline", PIPELINE_DEFAULT)).strip().lower()
     return pipeline if pipeline in PIPELINES else PIPELINE_DEFAULT
 

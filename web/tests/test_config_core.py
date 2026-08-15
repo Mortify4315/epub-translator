@@ -107,13 +107,13 @@ def test_chapter_limit(tmp_path, monkeypatch):
     assert config.get_chapter_limit() == 0
 
 
-def test_pipeline_defaults_to_two_pass_and_normalizes_invalid_values(tmp_path, monkeypatch):
+def test_pipeline_defaults_to_one_pass_and_normalizes_invalid_values(tmp_path, monkeypatch):
     _fresh_settings(tmp_path, monkeypatch, {})
-    assert config.get_pipeline() == "two-pass"
-    _fresh_settings(tmp_path, monkeypatch, {"pipeline": "one-pass"})
     assert config.get_pipeline() == "one-pass"
-    _fresh_settings(tmp_path, monkeypatch, {"pipeline": "experimental"})
+    _fresh_settings(tmp_path, monkeypatch, {"pipeline": "two-pass"})
     assert config.get_pipeline() == "two-pass"
+    _fresh_settings(tmp_path, monkeypatch, {"pipeline": "experimental"})
+    assert config.get_pipeline() == "one-pass"
 
 
 def test_strict_one_pass_requires_a_real_boolean(tmp_path, monkeypatch):
