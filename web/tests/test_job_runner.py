@@ -160,6 +160,9 @@ def _patch_run_env(monkeypatch, tmp_path, book_name="test_book.epub"):
 
 def test_budget_exceeded_emits_error_deletes_target_keeps_cache(monkeypatch, tmp_path):
     books, out, cache, stop = _patch_run_env(monkeypatch, tmp_path)
+    # This test drives the two-pass path (budget guard + cache handling
+    # live in the legacy engine), so pin the pipeline explicitly.
+    monkeypatch.setattr(job_runner.core.config, "get_pipeline", lambda: "two-pass")
     out.mkdir()
     target = out / "test_book.en.epub"
     target.write_bytes(b"partial output")
@@ -327,6 +330,10 @@ def test_one_pass_usage_budget_guard_accumulates_under_budget(monkeypatch, tmp_p
 
 def test_retry_knobs_flow_into_llm_and_translate(monkeypatch, tmp_path):
     books, out, cache, stop = _patch_run_env(monkeypatch, tmp_path)
+    # Pins the two-pass path: retry knobs and `translate` are legacy-engine
+    # surfaces (one-pass reads the same config but through a different
+    # entry point).
+    monkeypatch.setattr(job_runner.core.config, "get_pipeline", lambda: "two-pass")
     llm_calls = []
     translate_calls = {}
 
@@ -353,6 +360,9 @@ def test_retry_knobs_flow_into_llm_and_translate(monkeypatch, tmp_path):
 
 def test_cache_config_marker_includes_max_group_tokens(monkeypatch, tmp_path):
     books, out, cache, stop = _patch_run_env(monkeypatch, tmp_path)
+    # Pins the two-pass path: the cache-config marker is written by the
+    # legacy engine's prepare_pipeline_cache.
+    monkeypatch.setattr(job_runner.core.config, "get_pipeline", lambda: "two-pass")
     monkeypatch.setattr(job_runner.core.config, "get_max_group_tokens", lambda: 4321)
     monkeypatch.setattr(job_runner.core.translate_book, "LLM",
                         lambda **kwargs: _FakeLLM())
