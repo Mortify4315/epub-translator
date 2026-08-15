@@ -23,11 +23,12 @@ import sys
 import tempfile
 import time
 import zipfile
+from collections import Counter
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, MutableMapping, Sequence
-
+from typing import Any
 
 PIPELINES = ("two-pass", "one-pass")
 DEFAULT_PROVIDER = "deepseek"
@@ -36,6 +37,17 @@ DEFAULT_BASE_URLS = {
     "deepseek": "https://api.deepseek.com",
     "opencode-go": "https://opencode.ai/zen/go/v1",
     "openai": "https://api.openai.com/v1",
+}
+DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parents[1] / "cli" / "settings.json"
+DEFAULT_FILL_THINKING = "adaptive"
+# Pinned rates used by the acceptance report. These are metered USD per
+# million tokens; a zero-valued fallback leaves the cost gate explicitly
+# unmeasured rather than inventing a provider price.
+PRICING_TABLE: dict[tuple[str, str], tuple[float, float, float, str]] = {
+    (
+        "opencode-go",
+        "deepseek-v4-flash",
+    ): (0.14, 0.0028, 0.28, "OpenCode Go table dated 2026-08-14"),
 }
 PROVIDER_KEY_ENV = {
     "deepseek": "DEEPSEEK_API_KEY",
@@ -90,7 +102,7 @@ class SandboxPaths:
     glossary_dir: Path
 
     @classmethod
-    def create(cls, root: Path) -> "SandboxPaths":
+    def create(cls, root: Path) -> SandboxPaths:
         root = Path(root).resolve()
         paths = cls(
             root=root,
@@ -131,12 +143,17 @@ class PinnedSettings:
     base_url: str
     target_language: str = "English"
     thinking: str = "disabled"
+    fill_thinking: str = DEFAULT_FILL_THINKING
     max_group_tokens: int = 5000
     max_retries: int = 2
     retry_times: int = 2
     concurrency: int = 1
     strict: bool = True
     user_prompt: str = ""
+    fresh_input_price_per_m: float = 0.0
+    cached_input_price_per_m: float = 0.0
+    output_price_per_m: float = 0.0
+    pricing_source: str = "unpriced"
 
     def __post_init__(self) -> None:
         if not str(self.provider).strip():
@@ -145,15 +162,150 @@ class PinnedSettings:
             raise ValueError("model must not be empty")
         if not str(self.base_url).strip():
             raise ValueError("base_url must not be empty")
+        if self.thinking not in {"adaptive", "enabled", "disabled"}:
+            raise ValueError("thinking must be adaptive, enabled, or disabled")
+        if self.fill_thinking not in {"adaptive", "enabled", "disabled"}:
+            raise ValueError("fill_thinking must be adaptive, enabled, or disabled")
         if self.max_group_tokens <= 0:
             raise ValueError("max_group_tokens must be positive")
         if self.max_retries < 0 or self.retry_times < 0:
             raise ValueError("retry settings must not be negative")
         if self.concurrency <= 0:
             raise ValueError("concurrency must be positive")
+        if min(
+            self.fresh_input_price_per_m,
+            self.cached_input_price_per_m,
+            self.output_price_per_m,
+        ) < 0:
+            raise ValueError("pricing values must not be negative")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _coerce_setting_int(value: Any, default: int, *, minimum: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, parsed)
+
+
+def _read_settings_file(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read settings file {path}: {exc}") from exc
+    if not isinstance(data, Mapping):
+        raise ValueError(f"settings file must contain a JSON object: {path}")  # noqa: TRY004
+    return dict(data)
+
+
+def _pricing_for(provider: str, model: str) -> tuple[float, float, float, str]:
+    return PRICING_TABLE.get((provider, model), (0.0, 0.0, 0.0, "unpriced"))
+
+
+def load_configured_settings(
+    settings_file: str | Path | None = None,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    base_url: str | None = None,
+    target_language: str = "English",
+    thinking: str | None = None,
+    fill_thinking: str | None = None,
+    max_group_tokens: int | None = None,
+    max_retries: int | None = None,
+    retry_times: int | None = None,
+    concurrency: int | None = None,
+    strict: bool | None = None,
+) -> tuple[PinnedSettings, str | None]:
+    """Read production settings without writing or serializing credentials.
+
+    The returned key is held only in memory and is passed to the injected job
+    spec. It is intentionally absent from :class:`PinnedSettings`, reports,
+    and console output. Environment variables have the same precedence as the
+    application config for provider credentials and endpoint overrides.
+    """
+
+    path = Path(settings_file or DEFAULT_SETTINGS_FILE).expanduser()
+    data = _read_settings_file(path)
+    selected_provider = str(
+        provider or data.get("provider") or os.environ.get("EPUB_PROVIDER") or DEFAULT_PROVIDER
+    ).strip()
+    selected_model = str(
+        model
+        or data.get("model")
+        or os.environ.get(PROVIDER_MODEL_ENV.get(selected_provider, ""), "")
+        or DEFAULT_MODEL
+    ).strip()
+    selected_base_url = str(
+        base_url
+        or data.get("base_url")
+        or os.environ.get(PROVIDER_BASE_ENV.get(selected_provider, ""), "")
+        or DEFAULT_BASE_URLS.get(selected_provider, "")
+    ).strip()
+    if not selected_base_url:
+        raise ValueError(f"no base URL configured for provider {selected_provider!r}")
+
+    selected_thinking = str(
+        thinking if thinking is not None else data.get("thinking", "disabled")
+    ).strip().lower()
+    selected_fill_thinking = str(
+        fill_thinking
+        if fill_thinking is not None
+        else data.get("fill_thinking", DEFAULT_FILL_THINKING)
+    ).strip().lower()
+    selected_strict = (
+        bool(strict) if strict is not None else data.get("strict_one_pass", False) is True
+    )
+    fresh_price, cached_price, output_price, pricing_source = _pricing_for(
+        selected_provider, selected_model
+    )
+    settings = PinnedSettings(
+        provider=selected_provider,
+        model=selected_model,
+        base_url=selected_base_url,
+        target_language=target_language,
+        thinking=selected_thinking,
+        fill_thinking=selected_fill_thinking,
+        max_group_tokens=_coerce_setting_int(
+            max_group_tokens if max_group_tokens is not None else data.get("max_group_tokens", 5000),
+            5000,
+            minimum=1,
+        ),
+        max_retries=_coerce_setting_int(
+            max_retries if max_retries is not None else data.get("max_retries", 2),
+            2,
+        ),
+        retry_times=_coerce_setting_int(
+            retry_times if retry_times is not None else data.get("retry_times", 2),
+            2,
+        ),
+        concurrency=_coerce_setting_int(
+            concurrency if concurrency is not None else data.get("concurrency", 1),
+            1,
+            minimum=1,
+        ),
+        strict=selected_strict,
+        fresh_input_price_per_m=fresh_price,
+        cached_input_price_per_m=cached_price,
+        output_price_per_m=output_price,
+        pricing_source=pricing_source,
+    )
+
+    key_env = PROVIDER_KEY_ENV.get(selected_provider, "")
+    api_key = os.environ.get(key_env, "").strip() if key_env else ""
+    provider_keys = data.get("provider_keys")
+    if not api_key and isinstance(provider_keys, Mapping):
+        api_key = str(provider_keys.get(selected_provider, "")).strip()
+    if not api_key:
+        owner = str(data.get("api_key_provider", "deepseek")).strip()
+        if owner == selected_provider:
+            api_key = str(data.get("api_key", "")).strip()
+    return settings, (api_key or None)
 
 
 @dataclass(frozen=True)
@@ -169,6 +321,8 @@ class JobSpec:
     settings: PinnedSettings
     token_budget: int
     llm_factory: Callable[..., Any] | None = None
+    api_key: str | None = field(default=None, repr=False)
+    chapter_limit: int = 0
 
     @property
     def target_path(self) -> Path:
@@ -208,6 +362,8 @@ class JobMetrics:
     expected_blocks: int = 0
     translated_blocks: int = 0
     cjk_remnants: int = 0
+    source_characters: int = 0
+    estimated_cost_usd: float = 0.0
     wall_time_seconds: float = 0.0
     valid_archive: bool = False
     archive: dict[str, Any] = field(default_factory=dict)
@@ -215,7 +371,7 @@ class JobMetrics:
     glossary_checks: dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
-    def normalize(self) -> "JobMetrics":
+    def normalize(self) -> JobMetrics:
         """Fill derived counters without double-counting reasoning tokens."""
         if self.input_tokens and not (self.fresh_input_tokens or self.cached_input_tokens):
             self.fresh_input_tokens = max(0, int(self.input_tokens))
@@ -231,6 +387,8 @@ class JobMetrics:
             # leave translated_blocks at zero so the gate catches it.
             pass
         self.wall_time_seconds = round(max(0.0, float(self.wall_time_seconds)), 6)
+        self.source_characters = max(0, int(self.source_characters))
+        self.estimated_cost_usd = round(max(0.0, float(self.estimated_cost_usd)), 8)
         return self
 
     def to_dict(self) -> dict[str, Any]:
@@ -265,6 +423,8 @@ class JobMetrics:
             "expected_blocks": self.expected_blocks,
             "translated_blocks": self.translated_blocks,
             "cjk_remnants": self.cjk_remnants,
+            "source_characters": self.source_characters,
+            "estimated_cost_usd": self.estimated_cost_usd,
             "wall_time_seconds": self.wall_time_seconds,
             "valid_archive": self.valid_archive,
             "archive": self.archive,
@@ -440,6 +600,8 @@ class MetricsCollector:
             "expected_blocks": ("expected_blocks", "block_count", "expected"),
             "translated_blocks": ("translated_blocks", "output_block_count", "translated"),
             "cjk_remnants": ("cjk_remnants", "cjk_count", "cjk"),
+            "source_characters": ("source_characters", "source_chars", "characters"),
+            "estimated_cost_usd": ("estimated_cost_usd", "cost_usd", "cost"),
             "wall_time_seconds": ("wall_time_seconds", "wall_time", "elapsed_seconds"),
         }
         for target, names in aliases.items():
@@ -450,9 +612,12 @@ class MetricsCollector:
             if target == "wall_time_seconds":
                 if not current:
                     setattr(self.metrics, target, float(value))
-            elif target in {"expected_blocks", "translated_blocks"}:
+            elif target in {"expected_blocks", "translated_blocks", "source_characters"}:
                 if not current:
                     setattr(self.metrics, target, int(value))
+            elif target == "estimated_cost_usd":
+                if not current:
+                    setattr(self.metrics, target, float(value))
             elif target in {"input_tokens", "total_tokens"}:
                 if not current:
                     setattr(self.metrics, target, int(value))
@@ -614,6 +779,9 @@ def run_benchmark(
     settings: PinnedSettings,
     runners: Mapping[str, Callable[..., Any]] | Callable[..., Any] | None = None,
     sandbox_root: str | Path | None = None,
+    glossary_source_dir: str | Path | None = None,
+    api_key: str | None = None,
+    chapter_limit: int = 0,
     llm_factory: Callable[..., Any] | None = None,
 ) -> BenchmarkResult:
     """Run equivalent baseline/candidate jobs in an isolated filesystem.
@@ -627,6 +795,8 @@ def run_benchmark(
 
     if token_budget is None or int(token_budget) <= 0:
         raise ValueError("token_budget must be a positive integer")
+    if chapter_limit is None or int(chapter_limit) < 0:
+        raise ValueError("chapter_limit must be zero or a positive integer")
     if baseline_pipeline not in PIPELINES or candidate_pipeline not in PIPELINES:
         raise ValueError(f"pipelines must be one of {PIPELINES}")
     source = Path(source_path).expanduser().resolve()
@@ -639,6 +809,15 @@ def run_benchmark(
             shutil.copy2(source, sandbox_source)
         else:
             sandbox_source = source
+        glossary_source = (
+            Path(glossary_source_dir).expanduser().resolve()
+            if glossary_source_dir is not None
+            else source.parent.parent / "glossaries"
+        )
+        if glossary_source.is_dir():
+            for entry in sorted(glossary_source.glob("*.json")):
+                if entry.is_file():
+                    shutil.copy2(entry, sandbox.glossary_dir / entry.name)
         sandbox.settings_file.write_text(
             json.dumps(
                 {
@@ -674,6 +853,8 @@ def run_benchmark(
                 settings=settings,
                 token_budget=int(token_budget),
                 llm_factory=llm_factory,
+                api_key=api_key,
+                chapter_limit=int(chapter_limit),
             )
             runner = _resolve_runner(runners, pipeline)
             runs[pipeline] = _run_job(job, runner)
@@ -685,6 +866,9 @@ def run_benchmark(
             job_run.metrics.archive_comparison = compare_epub_inventories(
                 source_inventory, job_run.metrics.archive
             )
+        candidate.metrics.archive_comparison["baseline_comparison"] = compare_epub_inventories(
+            baseline.metrics.archive, candidate.metrics.archive
+        )
         evaluation = evaluate_gates(baseline.metrics, candidate.metrics)
         return BenchmarkResult(
             source_path=source,
@@ -711,6 +895,18 @@ def _resolve_runner(
     return runner
 
 
+def _estimate_cost_usd(metrics: JobMetrics, settings: PinnedSettings) -> float:
+    return round(
+        (
+            metrics.fresh_input_tokens * settings.fresh_input_price_per_m
+            + metrics.cached_input_tokens * settings.cached_input_price_per_m
+            + metrics.output_tokens * settings.output_price_per_m
+        )
+        / 1_000_000,
+        8,
+    )
+
+
 def _run_job(job: JobSpec, runner: Callable[..., Any]) -> JobRun:
     collector = MetricsCollector(job.pipeline)
     started = time.perf_counter()
@@ -728,6 +924,9 @@ def _run_job(job: JobSpec, runner: Callable[..., Any]) -> JobRun:
     metrics.valid_archive = bool(metrics.archive.get("valid_archive", False))
     source_analysis = analyze_epub_text(job.source_path)
     output_analysis = analyze_epub_text(job.output_path)
+    metrics.source_characters = len(source_analysis["text"])
+    if not metrics.estimated_cost_usd:
+        metrics.estimated_cost_usd = _estimate_cost_usd(metrics, job.settings)
     if not metrics.expected_blocks:
         metrics.expected_blocks = source_analysis["block_count"]
     if not metrics.translated_blocks:
@@ -794,6 +993,11 @@ def evaluate_gates(baseline: JobMetrics, candidate: JobMetrics) -> Evaluation:
     gates: dict[str, dict[str, Any]] = {}
     token_savings = _savings_ratio(baseline.total_tokens, candidate.total_tokens)
     request_savings = _savings_ratio(baseline.request_count, candidate.request_count)
+    cost_ratio = (
+        round(candidate.estimated_cost_usd / baseline.estimated_cost_usd, 6)
+        if baseline.estimated_cost_usd > 0
+        else None
+    )
     expected_blocks = baseline.translated_blocks or baseline.expected_blocks
     candidate_blocks = candidate.translated_blocks
     repair_rate = (
@@ -818,6 +1022,12 @@ def evaluate_gates(baseline: JobMetrics, candidate: JobMetrics) -> Evaluation:
         observed=request_savings,
         threshold=0.40,
         comparison=">=",
+    )
+    gates["metered_cost_ratio"] = _gate(
+        cost_ratio is not None and cost_ratio <= 0.60,
+        observed=cost_ratio,
+        threshold=0.60,
+        comparison="<=",
     )
     gates["wall_time"] = _gate(
         candidate.wall_time_seconds <= 80.0,
@@ -919,15 +1129,15 @@ def render_markdown(result: BenchmarkResult) -> str:
             "",
             "## Metrics",
             "",
-            "| Pipeline | Total tokens | Fresh input | Cached input | Output | Reasoning | Requests | Retries | Repairs | Fallbacks | Wall seconds | Valid EPUB |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+            "| Pipeline | Total tokens | Fresh input | Cached input | Output | Reasoning | Cost USD | Requests | Retries | Repairs | Fallbacks | Wall seconds | Valid EPUB |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     for job in (result.baseline, result.candidate):
         metrics = job.metrics
         metrics.normalize()
         lines.append(
-            "| {pipeline} | {total:,} | {fresh:,} | {cached:,} | {output:,} | {reasoning:,} | "
+            "| {pipeline} | {total:,} | {fresh:,} | {cached:,} | {output:,} | {reasoning:,} | {cost:.8f} | "
             "{requests:,} | {retries:,} | {repairs:,} | {fallbacks:,} | {wall:.6f} | {valid} |".format(
                 pipeline=job.pipeline,
                 total=metrics.total_tokens,
@@ -935,6 +1145,7 @@ def render_markdown(result: BenchmarkResult) -> str:
                 cached=metrics.cached_input_tokens,
                 output=metrics.output_tokens,
                 reasoning=metrics.reasoning_tokens,
+                cost=metrics.estimated_cost_usd,
                 requests=metrics.request_count,
                 retries=metrics.retry_count,
                 repairs=metrics.repair_count,
@@ -946,12 +1157,50 @@ def render_markdown(result: BenchmarkResult) -> str:
     lines.extend(
         [
             "",
+            "## Quality and structure",
+            "",
+            "| Pipeline | Blocks expected/translated | Missing | Unexpected | Drops | Duplicates | Reorders | Empty | CJK remnants | Glossary violations | Media removed/changed | Structure removed/unexpected changed | ZIP duplicates added |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for job in (result.baseline, result.candidate):
+        metrics = job.metrics
+        comparison = metrics.archive_comparison or {}
+        lines.append(
+            "| {pipeline} | {expected}/{translated} | {missing} | {unexpected} | {drops} | "
+            "{duplicates} | {reorders} | {empty} | {cjk} | {glossary} | {media_removed}/{media_changed} | "
+            "{structure_removed}/{structure_changed} | {duplicate_entries_added} |".format(
+                pipeline=job.pipeline,
+                expected=metrics.expected_blocks,
+                translated=metrics.translated_blocks,
+                missing=metrics.missing_blocks,
+                unexpected=metrics.unexpected_blocks,
+                drops=metrics.drop_count,
+                duplicates=metrics.duplicate_count,
+                reorders=metrics.reorder_count,
+                empty=metrics.empty_count,
+                cjk=metrics.cjk_remnants,
+                glossary=_check_count(metrics.glossary_checks, "violations"),
+                media_removed=len(comparison.get("media_removed", [])),
+                media_changed=len(comparison.get("media_changed", [])),
+                structure_removed=len(comparison.get("structure_removed", [])),
+                structure_changed=(
+                    len(comparison.get("structure_regression_changed", []))
+                    + len(comparison.get("structure_added_unexpected", []))
+                ),
+                duplicate_entries_added=len(comparison.get("duplicate_entries_added", [])),
+            )
+        )
+    lines.extend(
+        [
+            "",
             "## Source",
             "",
             f"- EPUB: `{result.source_path.name}`",
             f"- Token budget: `{result.token_budget:,}`",
             f"- Provider: `{result.settings.provider if result.settings else 'unspecified'}`",
             f"- Model: `{result.settings.model if result.settings else 'unspecified'}`",
+            f"- Pricing: `{result.settings.pricing_source if result.settings else 'unpriced'}`",
             "",
         ]
     )
@@ -982,8 +1231,10 @@ def inspect_epub(path: str | Path) -> dict[str, Any]:
         "zip_test_error": None,
         "entry_count": 0,
         "entries": [],
+        "duplicate_entries": [],
         "non_text_entries": [],
         "structure_entries": [],
+        "structure_inventory": {},
         "media_entries": [],
         "media_inventory": {},
     }
@@ -996,6 +1247,9 @@ def inspect_epub(path: str | Path) -> dict[str, Any]:
             names = sorted(info.filename for info in infos)
             inventory["entry_count"] = len(names)
             inventory["entries"] = names
+            inventory["duplicate_entries"] = sorted(
+                name for name, count in Counter(names).items() if count > 1
+            )
             bad_name = archive.testzip()
             if bad_name:
                 inventory["zip_test_error"] = f"CRC failure: {bad_name}"
@@ -1011,7 +1265,7 @@ def inspect_epub(path: str | Path) -> dict[str, Any]:
                 inventory["zip_test_error"] = "mimetype is not application/epub+zip"
                 return inventory
             media: dict[str, dict[str, Any]] = {}
-            structure: list[str] = []
+            structure: dict[str, dict[str, Any]] = {}
             non_text: list[str] = []
             for info in infos:
                 name = info.filename
@@ -1022,11 +1276,17 @@ def inspect_epub(path: str | Path) -> dict[str, Any]:
                 if suffix in STRUCTURE_SUFFIXES or Path(name).name.lower() in {
                     "container.xml", "nav.xhtml", "toc.xhtml", "toc.ncx"
                 }:
-                    structure.append(name)
+                    structure[name] = {
+                        "size": info.file_size,
+                        "sha256": hashlib.sha256(archive.read(name)).hexdigest(),
+                    }
                 if suffix not in TEXT_SUFFIXES:
                     non_text.append(name)
             inventory["media_inventory"] = {key: media[key] for key in sorted(media)}
             inventory["media_entries"] = sorted(media)
+            inventory["structure_inventory"] = {
+                key: structure[key] for key in sorted(structure)
+            }
             inventory["structure_entries"] = sorted(structure)
             inventory["non_text_entries"] = sorted(non_text)
             inventory["valid_archive"] = True
@@ -1035,40 +1295,156 @@ def inspect_epub(path: str | Path) -> dict[str, Any]:
     return inventory
 
 
+def _logical_epub_name(name: str) -> str:
+    """Normalize the application OEBPS/EPUB packaging prefix for comparison."""
+
+    normalized = str(name).replace("\\", "/")
+    for prefix in ("OEBPS/", "EPUB/"):
+        if normalized.startswith(prefix):
+            return normalized[len(prefix) :]
+    return normalized
+
+
+def _inventory_value_map(
+    inventory: Mapping[str, Any], mapping_key: str, entries_key: str
+) -> dict[str, Any]:
+    raw = inventory.get(mapping_key, {})
+    if isinstance(raw, Mapping):
+        return {_logical_epub_name(name): value for name, value in raw.items()}
+    return {
+        _logical_epub_name(name): True for name in inventory.get(entries_key, [])
+    }
+
+
+def _display_names(
+    logical_names: Sequence[str],
+    source_map: Mapping[str, Any],
+    candidate_map: Mapping[str, Any],
+) -> list[str]:
+    """Prefer source spelling in reports, falling back to candidate spelling."""
+
+    source_names = {
+        _logical_epub_name(name): str(name)
+        for name in source_map.get("_raw_names", [])
+    }
+    candidate_names = {
+        _logical_epub_name(name): str(name)
+        for name in candidate_map.get("_raw_names", [])
+    }
+    return sorted(
+        source_names.get(name, candidate_names.get(name, name)) for name in logical_names
+    )
+
+
+def _raw_name_map(inventory: Mapping[str, Any], entries_key: str) -> dict[str, Any]:
+    """Return logical entries plus raw names used for human-readable output."""
+
+    values = _inventory_value_map(inventory, entries_key.replace("_entries", "_inventory"), entries_key)
+    values["_raw_names"] = list(inventory.get(entries_key, []))
+    return values
+
+
+def _logical_keys(mapping: Mapping[str, Any]) -> set[str]:
+    return {key for key in mapping if key != "_raw_names"}
+
+
 def compare_epub_inventories(
     source: Mapping[str, Any], candidate: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """Compare preservation-sensitive EPUB entries and report regressions."""
+    """Compare preservation-sensitive EPUB entries and report regressions.
 
-    source_media = set(source.get("media_entries", []))
-    candidate_media = set(candidate.get("media_entries", []))
-    source_structure = set(source.get("structure_entries", []))
-    candidate_structure = set(candidate.get("structure_entries", []))
-    source_non_text = set(source.get("non_text_entries", []))
-    candidate_non_text = set(candidate.get("non_text_entries", []))
-    source_hashes = source.get("media_inventory", {})
-    candidate_hashes = candidate.get("media_inventory", {})
-    media_changed = sorted(
-        name
-        for name in source_media & candidate_media
-        if source_hashes.get(name) != candidate_hashes.get(name)
+    ``prepare_epub`` legitimately renames the package directory from OEBPS to
+    EPUB and rewrites container/OPF/navigation text.  Compare logical paths so
+    those expected transformations do not look like removed media or structure.
+    Only non-text changes and unexpected structure changes are regressions.
+    """
+
+    source_media = _raw_name_map(source, "media_entries")
+    candidate_media = _raw_name_map(candidate, "media_entries")
+    source_structure = _raw_name_map(source, "structure_entries")
+    candidate_structure = _raw_name_map(candidate, "structure_entries")
+    source_non_text = _raw_name_map(source, "non_text_entries")
+    candidate_non_text = _raw_name_map(candidate, "non_text_entries")
+    source_media_hashes = _inventory_value_map(source, "media_inventory", "media_entries")
+    candidate_media_hashes = _inventory_value_map(candidate, "media_inventory", "media_entries")
+    source_structure_hashes = _inventory_value_map(
+        source, "structure_inventory", "structure_entries"
     )
-    structure_changed = sorted(
-        name
-        for name in source_structure & candidate_structure
-        if _entry_signature(source, name) != _entry_signature(candidate, name)
+    candidate_structure_hashes = _inventory_value_map(
+        candidate, "structure_inventory", "structure_entries"
     )
-    media_removed = sorted(source_media - candidate_media)
-    media_added = sorted(candidate_media - source_media)
-    structure_removed = sorted(source_structure - candidate_structure)
-    structure_added = sorted(candidate_structure - source_structure)
-    non_text_removed = sorted(source_non_text - candidate_non_text)
-    non_text_added = sorted(candidate_non_text - source_non_text)
+    source_duplicates = {
+        _logical_epub_name(name) for name in source.get("duplicate_entries", [])
+    }
+    candidate_duplicates = {
+        _logical_epub_name(name) for name in candidate.get("duplicate_entries", [])
+    }
+    source_media_keys = _logical_keys(source_media)
+    candidate_media_keys = _logical_keys(candidate_media)
+    source_structure_keys = _logical_keys(source_structure)
+    candidate_structure_keys = _logical_keys(candidate_structure)
+    source_non_text_keys = _logical_keys(source_non_text)
+    candidate_non_text_keys = _logical_keys(candidate_non_text)
+    media_common = source_media_keys & candidate_media_keys
+    structure_common = source_structure_keys & candidate_structure_keys
+    media_changed = _display_names(
+        [name for name in media_common if source_media_hashes.get(name) != candidate_media_hashes.get(name)],
+        source_media,
+        candidate_media,
+    )
+    structure_changed = _display_names(
+        [
+            name
+            for name in structure_common
+            if source_structure_hashes.get(name) != candidate_structure_hashes.get(name)
+        ],
+        source_structure,
+        candidate_structure,
+    )
+    media_removed = _display_names(
+        sorted(source_media_keys - candidate_media_keys), source_media, candidate_media
+    )
+    media_added = _display_names(
+        sorted(candidate_media_keys - source_media_keys), source_media, candidate_media
+    )
+    structure_removed = _display_names(
+        sorted(source_structure_keys - candidate_structure_keys), source_structure, candidate_structure
+    )
+    structure_added = _display_names(
+        sorted(candidate_structure_keys - source_structure_keys), source_structure, candidate_structure
+    )
+    non_text_removed = _display_names(
+        sorted(source_non_text_keys - candidate_non_text_keys), source_non_text, candidate_non_text
+    )
+    non_text_added = _display_names(
+        sorted(candidate_non_text_keys - source_non_text_keys), source_non_text, candidate_non_text
+    )
+    source_duplicate_map = {"_raw_names": list(source.get("duplicate_entries", []))}
+    candidate_duplicate_map = {"_raw_names": list(candidate.get("duplicate_entries", []))}
+    duplicate_added = _display_names(
+        sorted(candidate_duplicates - source_duplicates), source_duplicate_map, candidate_duplicate_map
+    )
+    mutable_structure = {"content.opf", "nav.xhtml", "toc.ncx", "container.xml"}
+    generated_structure = {"nav.xhtml"}
+    structure_regression_changed = [
+        name
+        for name in structure_changed
+        if Path(name).name.lower() not in mutable_structure
+    ]
+    structure_added_unexpected = [
+        name
+        for name in structure_added
+        if Path(name).name.lower() not in generated_structure
+    ]
     regressions = (
         not bool(candidate.get("valid_archive", False))
         or bool(media_removed)
+        or bool(media_changed)
         or bool(structure_removed)
+        or bool(structure_regression_changed)
+        or bool(structure_added_unexpected)
         or bool(non_text_removed)
+        or bool(duplicate_added)
     )
     return {
         "regressions": regressions,
@@ -1080,8 +1456,13 @@ def compare_epub_inventories(
         "structure_removed": structure_removed,
         "structure_added": structure_added,
         "structure_changed": structure_changed,
+        "structure_regression_changed": structure_regression_changed,
+        "structure_added_unexpected": structure_added_unexpected,
         "non_text_removed": non_text_removed,
         "non_text_added": non_text_added,
+        "source_duplicate_entries": sorted(source_duplicates),
+        "candidate_duplicate_entries": sorted(candidate_duplicates),
+        "duplicate_entries_added": duplicate_added,
     }
 
 
@@ -1104,6 +1485,10 @@ def analyze_epub_text(path: str | Path) -> dict[str, Any]:
                 except KeyError:
                     continue
                 chunks.append(_strip_markup(content))
+                suffix = Path(name).suffix.lower()
+                basename = Path(name).name.lower()
+                if suffix in {".opf", ".ncx"} or basename in {"nav.xhtml", "toc.xhtml", "toc.ncx"}:
+                    continue
                 blocks.extend(_extract_blocks(content))
     except (OSError, zipfile.BadZipFile):
         return result
@@ -1201,6 +1586,17 @@ def _extract_blocks(content: str) -> list[str]:
     )
     for match in pattern.finditer(content):
         blocks.append(_strip_markup(match.group("body")).strip())
+    if re.search(r"<p\b", content, re.IGNORECASE):
+        return blocks
+    body_match = re.search(r"<body\b[^>]*>(?P<body>.*?)</body\s*>", content, re.IGNORECASE | re.DOTALL)
+    if not body_match:
+        return blocks
+    body = body_match.group("body")
+    body = re.sub(r"<h[1-6]\b[^>]*>.*?</h[1-6]\s*>", "", body, flags=re.IGNORECASE | re.DOTALL)
+    for chunk in re.split(r"<br\s*/?>", body, flags=re.IGNORECASE):
+        text = _strip_markup(chunk).strip()
+        if text:
+            blocks.append(text)
     return blocks
 
 
@@ -1238,26 +1634,25 @@ def _default_runner(job: JobSpec, collector: MetricsCollector) -> Mapping[str, A
         raise BenchmarkError(f"CLI directory not found: {cli_dir}")
     modules = _load_cli_modules(cli_dir, job.sandbox)
     provider_env = PROVIDER_KEY_ENV.get(job.settings.provider, "")
-    api_key = os.environ.get(provider_env, "").strip() if provider_env else ""
+    api_key = (job.api_key or "").strip()
+    if not api_key and provider_env:
+        api_key = os.environ.get(provider_env, "").strip()
     if job.llm_factory is None and not api_key:
         raise BenchmarkError(
-            f"no API key in {provider_env or 'provider environment'} for paid benchmark"
+            f"no API key in {provider_env or 'the configured settings file or provider environment'}"
         )
 
     from epub_translator import LLM, SubmitKind, language, translate
 
-    extra_body = {}
-    if job.settings.thinking in {"adaptive", "enabled", "disabled"} and job.settings.provider in {
-        "deepseek",
-        "opencode-go",
-    }:
-        extra_body = {
-            "thinking": {
-                "type": "adaptive" if job.settings.thinking == "adaptive" else job.settings.thinking
-            }
-        }
+    def extra_body(thinking: str) -> dict[str, Any]:
+        if thinking in {"adaptive", "enabled", "disabled"} and job.settings.provider in {
+            "deepseek",
+            "opencode-go",
+        }:
+            return {"thinking": {"type": thinking}}
+        return {}
 
-    def make_llm() -> Any:
+    def make_llm(thinking: str) -> Any:
         if job.llm_factory is not None:
             llm = _invoke_llm_factory(job.llm_factory, job, collector)
         else:
@@ -1270,65 +1665,106 @@ def _default_runner(job: JobSpec, collector: MetricsCollector) -> Mapping[str, A
                 retry_times=job.settings.retry_times,
                 retry_interval_seconds=6.0,
                 temperature=0.4,
-                extra_body=extra_body,
+                extra_body=extra_body(thinking),
             )
-        return _instrument_llm(llm, collector)
+        return _instrument_llm(llm, collector, token_budget=job.token_budget)
 
     glossary_module = modules["glossary"]
     book_key = glossary_module.book_key(job.source_path.name)
     glossary = glossary_module.merge_glossaries(book_key)
     prompt = job.settings.user_prompt or glossary_module.build_translation_prompt(glossary)
-    translation_llm = make_llm()
+    translation_llm = make_llm(job.settings.thinking)
+    fill_llm = None
     prepared_source = modules["translate_book"].prepare_epub(
         job.source_path, job.cache_dir / "prep"
     )
-
-    if job.pipeline == "two-pass":
-        fill_llm = make_llm()
-        translate(
-            source_path=str(prepared_source),
-            target_path=str(job.output_path),
-            target_language=language.ENGLISH,
-            submit=SubmitKind.REPLACE,
-            user_prompt=prompt,
-            max_retries=job.settings.max_retries,
-            translation_llm=translation_llm,
-            fill_llm=fill_llm,
-            concurrency=job.settings.concurrency,
-            max_group_tokens=job.settings.max_group_tokens,
-            on_fill_failed=lambda *_args, **_kwargs: collector.record_fallback(),
-        )
-    else:
-        onepass_module = modules.get("onepass")
-        if onepass_module is None or not hasattr(onepass_module, "translate_one_pass"):
-            raise BenchmarkError(
-                "one-pass core API is unavailable; merge cli/onepass.py before live benchmarking"
+    onepass_report = None
+    pending: Exception | None = None
+    try:
+        if job.pipeline == "two-pass":
+            fill_llm = make_llm(job.settings.fill_thinking)
+            translate(
+                source_path=str(prepared_source),
+                target_path=str(job.output_path),
+                target_language=language.ENGLISH,
+                submit=SubmitKind.REPLACE,
+                user_prompt=prompt,
+                max_retries=job.settings.max_retries,
+                translation_llm=translation_llm,
+                fill_llm=fill_llm,
+                concurrency=job.settings.concurrency,
+                max_group_tokens=job.settings.max_group_tokens,
+                on_fill_failed=lambda *_args, **_kwargs: collector.record_fallback(),
             )
+        else:
+            onepass_module = modules.get("onepass")
+            if onepass_module is None or not hasattr(onepass_module, "translate_one_pass"):
+                raise BenchmarkError(
+                    "one-pass core API is unavailable; merge cli/onepass.py before live benchmarking"
+                )
 
-        def on_protocol_failed(*_args: Any, **_kwargs: Any) -> None:
-            collector.record_repair()
+            def on_protocol_failed(*_args: Any, **_kwargs: Any) -> None:
+                return None
 
-        onepass_module.translate_one_pass(
-            source_path=job.source_path,
-            target_path=job.output_path,
-            target_language=language.ENGLISH,
-            user_prompt=prompt,
-            translation_llm=translation_llm,
-            max_group_tokens=job.settings.max_group_tokens,
-            max_retries=job.settings.max_retries,
-            strict=job.settings.strict,
-            chapter_limit=0,
-            on_protocol_failed=on_protocol_failed,
-        )
-    _snapshot_llm(translation_llm, collector)
-    if job.pipeline == "two-pass":
-        _snapshot_llm(fill_llm, collector)
+            onepass_report = onepass_module.translate_one_pass(
+                source_path=prepared_source,
+                target_path=job.output_path,
+                target_language=language.ENGLISH,
+                user_prompt=prompt,
+                translation_llm=translation_llm,
+                max_group_tokens=job.settings.max_group_tokens,
+                max_retries=job.settings.max_retries,
+                strict=job.settings.strict,
+                chapter_limit=job.chapter_limit,
+                on_protocol_failed=on_protocol_failed,
+            )
+    except Exception as exc:  # noqa: BLE001 - report runner failures without masking telemetry
+        pending = exc
+        if onepass_report is None:
+            onepass_report = getattr(exc, "report", None)
+    finally:
+        _snapshot_llm(translation_llm, collector)
+        if fill_llm is not None:
+            _snapshot_llm(fill_llm, collector)
+
+    if onepass_report is not None:
+        _merge_onepass_report(onepass_report, collector)
     if collector.metrics.total_tokens > job.token_budget:
         raise BenchmarkError(
             f"{job.pipeline} exceeded token budget: "
             f"{collector.metrics.total_tokens:,} > {job.token_budget:,}"
         )
+    if pending is not None:
+        raise pending
     return {"target": str(job.output_path)}
+
+
+def _merge_onepass_report(report: Any, collector: MetricsCollector) -> None:
+    """Merge deterministic one-pass protocol counters into benchmark metrics."""
+
+    if report is None:
+        return
+    groups = int(getattr(report, "groups", 0) or 0)
+    if groups:
+        collector.record_group(groups)
+    full_retries = int(getattr(report, "full_group_retries", 0) or 0)
+    subset_requests = int(getattr(report, "subset_requests", 0) or 0)
+    individual_requests = int(getattr(report, "individual_requests", 0) or 0)
+    collector.record_repair(full_retries + subset_requests + individual_requests)
+    fallback_units = int(getattr(report, "fallback_units", 0) or 0)
+    if fallback_units:
+        collector.record_fallback(fallback_units)
+    cjk_remnants = getattr(report, "cjk_remnants", ())
+    if cjk_remnants:
+        collector.metrics.cjk_remnants = max(
+            collector.metrics.cjk_remnants, len(cjk_remnants)
+        )
+    failures = getattr(report, "failures", ())
+    if failures:
+        collector.metrics.errors.extend(
+            f"one-pass protocol failure: {item}" for item in failures
+        )
+
 
 
 def _load_cli_modules(cli_dir: Path, sandbox: SandboxPaths) -> dict[str, Any]:
@@ -1390,13 +1826,20 @@ class _InstrumentedExecutor:
     """Internal adapter used only by the default live runner."""
 
 
-def _instrument_llm(llm: Any, collector: MetricsCollector) -> Any:
+def _instrument_llm(
+    llm: Any, collector: MetricsCollector, *, token_budget: int | None = None
+) -> Any:
     statistics = getattr(llm, "_statistics", None)
     if statistics is not None and hasattr(statistics, "submit_usage"):
         original_submit = statistics.submit_usage
 
         def submit_usage(usage: Any) -> Any:
             _record_usage_object(collector, usage)
+            if token_budget is not None and collector.metrics.total_tokens > int(token_budget):
+                raise BenchmarkError(
+                    f"{collector.metrics.name} exceeded token budget: "
+                    f"{collector.metrics.total_tokens:,} > {int(token_budget):,}"
+                )
             return original_submit(usage)
 
         statistics.submit_usage = submit_usage
@@ -1419,6 +1862,27 @@ def _instrument_llm(llm: Any, collector: MetricsCollector) -> Any:
 def _record_usage_object(collector: MetricsCollector, usage: Any) -> None:
     if usage is None:
         return
+    if isinstance(usage, Mapping):
+        details = usage.get("prompt_tokens_details") or {}
+        completion_details = usage.get("completion_tokens_details") or {}
+        cached = (
+            details.get("cached_tokens", 0)
+            if isinstance(details, Mapping)
+            else getattr(details, "cached_tokens", 0)
+        )
+        reasoning = (
+            completion_details.get("reasoning_tokens", 0)
+            if isinstance(completion_details, Mapping)
+            else getattr(completion_details, "reasoning_tokens", 0)
+        )
+        collector.record_usage(
+            input_tokens=_number(usage, "prompt_tokens", "input_tokens", "input"),
+            cached_input_tokens=int(cached or 0),
+            output_tokens=_number(usage, "completion_tokens", "output_tokens", "output"),
+            reasoning_tokens=int(reasoning or 0),
+            total_tokens=_number(usage, "total_tokens", "total"),
+        )
+        return
     details = getattr(usage, "prompt_tokens_details", None)
     cached = getattr(details, "cached_tokens", 0) if details is not None else 0
     completion_details = getattr(usage, "completion_tokens_details", None)
@@ -1437,6 +1901,7 @@ def _snapshot_llm(llm: Any, collector: MetricsCollector) -> None:
         input_tokens=int(getattr(llm, "input_tokens", 0) or 0),
         cached_input_tokens=int(getattr(llm, "input_cache_tokens", 0) or 0),
         output_tokens=int(getattr(llm, "output_tokens", 0) or 0),
+        reasoning_tokens=int(getattr(llm, "reasoning_tokens", 0) or 0),
         total_tokens=int(getattr(llm, "total_tokens", 0) or 0),
     )
 
@@ -1463,13 +1928,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider", default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument("--base-url", default=None)
+    parser.add_argument("--settings-file", default=None, help="read-only production settings JSON")
+    parser.add_argument("--glossary-dir", default=None, help="read-only glossary directory")
     parser.add_argument("--target-language", default="English")
-    parser.add_argument("--thinking", choices=("adaptive", "enabled", "disabled"), default="disabled")
-    parser.add_argument("--max-group-tokens", type=int, default=5000)
-    parser.add_argument("--max-retries", type=int, default=2)
-    parser.add_argument("--retry-times", type=int, default=2)
-    parser.add_argument("--concurrency", type=int, default=1)
-    parser.add_argument("--strict", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--thinking", choices=("adaptive", "enabled", "disabled"), default=None
+    )
+    parser.add_argument(
+        "--fill-thinking", choices=("adaptive", "enabled", "disabled"), default=None
+    )
+    parser.add_argument("--max-group-tokens", type=int, default=None)
+    parser.add_argument("--max-retries", type=int, default=None)
+    parser.add_argument("--retry-times", type=int, default=None)
+    parser.add_argument("--concurrency", type=int, default=None)
+    parser.add_argument("--strict", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--chapter-limit", type=int, default=0)
     parser.add_argument("--sandbox-root", default=None)
     return parser
 
@@ -1486,33 +1959,63 @@ def main(
         parser.error("--token-budget is required; refusing an unbounded paid run")
     if args.token_budget <= 0:
         parser.error("--token-budget must be positive")
+    # This is deliberately the first normal console output: the operator sees
+    # the maximum requested spend before the paid-confirmation gate dispatches.
+    print(f"Requested token budget: {args.token_budget:,} tokens")
     if not args.confirm_paid:
         parser.error("live benchmark requires explicit --confirm-paid")
+    if args.chapter_limit < 0:
+        parser.error("--chapter-limit must be zero or positive")
     source = Path(args.source).expanduser()
     if not source.is_file():
         parser.error(f"source EPUB does not exist: {source}")
-    if settings is None:
-        provider = args.provider or os.environ.get("EPUB_PROVIDER", DEFAULT_PROVIDER)
-        model = args.model or os.environ.get(PROVIDER_MODEL_ENV.get(provider, ""), DEFAULT_MODEL)
-        base_url = args.base_url or os.environ.get(
-            PROVIDER_BASE_ENV.get(provider, ""), DEFAULT_BASE_URLS.get(provider, "")
-        )
-        try:
-            settings = PinnedSettings(
-                provider=provider,
-                model=model,
-                base_url=base_url,
+
+    inferred_settings_file = source.parent.parent / "settings.json"
+    settings_file = Path(args.settings_file).expanduser() if args.settings_file else (
+        inferred_settings_file if inferred_settings_file.is_file() else DEFAULT_SETTINGS_FILE
+    )
+    glossary_source_dir = (
+        Path(args.glossary_dir).expanduser()
+        if args.glossary_dir
+        else source.parent.parent / "glossaries"
+    )
+    api_key: str | None = None
+    try:
+        if settings is None:
+            settings, api_key = load_configured_settings(
+                settings_file,
+                provider=args.provider,
+                model=args.model,
+                base_url=args.base_url,
                 target_language=args.target_language,
                 thinking=args.thinking,
+                fill_thinking=args.fill_thinking,
                 max_group_tokens=args.max_group_tokens,
                 max_retries=args.max_retries,
                 retry_times=args.retry_times,
                 concurrency=args.concurrency,
                 strict=args.strict,
             )
-        except ValueError as exc:
-            parser.error(str(exc))
-    print(f"Requested token budget: {args.token_budget:,} tokens")
+        else:
+            # Programmatic callers may inject settings while still using the
+            # configured key; this path never includes the key in the report.
+            _, api_key = load_configured_settings(
+                settings_file,
+                provider=settings.provider,
+                model=settings.model,
+                base_url=settings.base_url,
+                target_language=settings.target_language,
+                thinking=settings.thinking,
+                fill_thinking=settings.fill_thinking,
+                max_group_tokens=settings.max_group_tokens,
+                max_retries=settings.max_retries,
+                retry_times=settings.retry_times,
+                concurrency=settings.concurrency,
+                strict=settings.strict,
+            )
+    except ValueError as exc:
+        parser.error(str(exc))
+
     result = run_benchmark(
         source,
         baseline_pipeline=args.baseline,
@@ -1521,6 +2024,9 @@ def main(
         settings=settings,
         runners=runners,
         sandbox_root=args.sandbox_root,
+        glossary_source_dir=glossary_source_dir,
+        api_key=api_key,
+        chapter_limit=args.chapter_limit,
     )
     json_path, markdown_path = write_reports(result, args.output)
     print(f"Decision: {'GO' if result.evaluation.go else 'NO-GO'}")
@@ -1565,7 +2071,7 @@ def _jsonable(value: Any) -> Any:
     if hasattr(value, "item") and callable(value.item):
         try:
             return value.item()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             pass
     return value
 
