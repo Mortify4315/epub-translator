@@ -196,3 +196,139 @@ Until the gates above close, the acceptance decision remains **NO-GO** and
 `pipeline=two-pass` remains the safe default. The pilot's only executable
 conclusion this round: the repaired budget guard works live, telemetry is
 valid, and 100,000 tokens is insufficient for this 5-chapter pilot book.
+
+---
+
+## Continuation session — calibrated pilot, E4, and production eligibility
+
+### Pilot rerun (5-ch book, 150,000-token budget) — a discovery, not a measurement
+
+Authorized rerun on the same `Test_ChiXinXunTian_5ch.epub`, budget 150,000:
+
+| Metric | two-pass (baseline) | one-pass (candidate) |
+| --- | ---: | ---: |
+| Total tokens | 163,673 (guard fired) | 106,876 (completed) |
+| Requests / retries | 24 / 5 | 16 / 0 |
+| Blocks translated | 0 (headers only) | 619 / 619 |
+| Errors | `exceeded token budget: 163,673 > 150,000` | strict CJK gate abort (see below) |
+
+Two findings:
+
+1. **The doc's 110–130k two-pass estimate was wrong.** The two-pass run
+   exceeded 150,000 tokens *before starting chapters* (TOC/metadata/nav
+   through the full TRANSLATE+FILL machinery with adaptive fill thinking).
+   The completed-run calibration in `translate_book.estimate()` (251,722
+   tokens for the 5-ch book, 404,141 for 13 chapters) is the correct basis.
+2. **The 5-ch test book is non-flat.** Its chapters carry the
+   `<div id="chapter">` wrapper of the production book, so *every* chapter
+   routed through the chapter-scoped two-pass fallback — the numbered
+   protocol never ran live in either pilot. All 1,753/16,765 CJK remnants
+   were fallback FILL backfill. The strict CJK gate (commit `0e1eed5`)
+   caught the backfill and aborted loudly (strict) after one corrective
+   reroute — working as designed. The reroute is a fresh call (the remedy
+   prompt changes the cache-key messages hash), so the remaining CJK is
+   model behavior on that chapter, not a cache artifact.
+
+### E4 preparation
+
+The plan's Task-6 source `赤心巡天_test.epub` is a `<br>`-based,
+traditional-Chinese 5-chapter book (0 `<p>` tags) — unusable for a
+one-pass measurement. A new flat slice was built from the production book:
+`cli/books/Test_ChiXinXunTian_13ch.epub` — first 13 real chapters
+(`chapter_00001..00013`), wrapper unwrapped, **13/13 flat, 1,113 units**,
+20 entries (cover + chapters + nav + ncx + css + media). `prepare_epub`
+is a no-op on it (verified), so the harness measures the real pipeline.
+
+### E4 gate — run 1 (serial chapter dispatch): 12/13 gates
+
+| Gate | Observed | Result |
+| --- | ---: | ---: |
+| token_savings (≥50%) | 84.8% | ✅ |
+| request_savings (≥40%) | 66.7% | ✅ |
+| metered_cost_ratio (≤0.6) | 0.176 | ✅ |
+| wall_time (≤80s) | 346.8s | ❌ |
+| exact_block_count | 1130/1130 | ✅ |
+| zero drops/dups/reorders/empty/missing/unexpected | 0 each | ✅ |
+| zero_fallbacks / repair_rate (≤2%) | 0 / 0.0 | ✅ |
+| no_cjk / no_glossary_regression / no_epub_regression | clean | ✅ |
+| valid EPUB both pipelines | yes | ✅ |
+
+One-pass: 70,701 tokens (32,325 fresh in, 38,376 out, 0 reasoning), 14
+requests, 0 retries, 0 CJK in output, complete archive. **Root cause of
+the wall-time failure:** each chapter is one 10k-token group (~25s), and
+chapters were dispatched serially — the 32-way concurrency never engaged
+across chapters (the two-pass engine parallelizes chapters; one-pass did
+not).
+
+### Fixes applied (all committed to `main`)
+
+- `1514f65` — parallel group dispatch within a chapter (bounded pool,
+  lock-protected report, order-preserving reinsertion).
+- `3735187` — **wave-based parallel chapter dispatch**: waves of
+  `group_concurrency` chapters; the main thread reads/writes the archive
+  (Zip is not thread-safe) in spine order, workers translate (LLM only).
+  Progress stays deterministic; chapter_limit translates exactly `limit`
+  chapters; strict aborts ship preceding chapters and name the failing
+  chapter; legacy chapters run inside the same waves.
+- `507c36e` — **transparent wrapper-div eligibility**: the production
+  book wraps every chapter in `<div id="chapter">`; a single transparent
+  wrapper (no text/tail of its own) no longer makes a body non-flat.
+  Verified: 5-ch book 5/5 flat, production book 15/15 flat. Without this,
+  the real book would route every chapter to the two-pass fallback and
+  one-pass would never run on it (no cost savings; strict mode would
+  abort on the first FILL source echo).
+- `93cdf49` — **no_cjk gate semantics**: the gate now scans the candidate
+  OUTPUT archive for substantive CJK runs (2+ contiguous, incl.
+  Extension-B) instead of counting report entries, which include
+  intermediate ladder attempts that were *repaired before shipping*
+  (visibility by design, plan §3.6). The engine validator now also covers
+  Extension-B (rare glyphs such as `𠮷` must not ship silently).
+
+### E4 gate — run 2 (wave dispatch): wall time fixed
+
+| Gate | Observed | Result |
+| --- | ---: | ---: |
+| token_savings (≥50%) | 84.2% | ✅ |
+| request_savings (≥40%) | 62.0% | ✅ |
+| metered_cost_ratio (≤0.6) | 0.129 | ✅ |
+| wall_time (≤80s) | **58.5s** | ✅ |
+| exact_block_count | 1130/1130 | ✅ |
+| zero drops/dups/reorders/empty/missing/unexpected | 0 each | ✅ |
+| zero_fallbacks | 0 | ✅ |
+| no_cjk (output scan) | 0 runs | ✅ |
+| no_glossary_regression / no_epub_regression | clean | ✅ |
+| valid EPUB both pipelines | yes | ✅ |
+| no_runner_errors | none | ✅ |
+| **repair_rate (≤2%)** | **2/13 = 15.4%** | ❌ |
+
+One-pass: 80,476 tokens, 16 requests, wall 58.5s, complete archive,
+output scan CJK-free (the 1 recorded remnant was an intermediate attempt
+the bounded ladder repaired — verified by direct scan of every entry).
+Two-pass baseline: 508,266 tokens, 42 requests, 196.3s.
+
+**repair_rate is the only remaining E4 failure, and it is a sample-size
+artifact:** with `max_group_tokens=10000` the E4 slice is 13–16 groups,
+so *any* single retry (1/13 = 7.7%) fails the ≤2% gate — effectively
+zero-tolerance. Run 1 had 0 repairs; run 2 had 2 (both single retries
+that succeeded). The 100-chapter canary below measures the rate at
+production scale, where the gate is meaningful.
+
+qa_check on the completed E4 one-pass output: **"No consistency issues
+found."**
+
+### Production eligibility
+
+The production book (`Chi Xin Xun Tian.epub`, 2,941 spine items) wraps
+every chapter in `<div id="chapter">`. With the transparent-wrapper rule
+(`507c36e`) its chapters classify flat (verified 15/15 on a sample), so
+the one-pass pipeline applies to the real book — the premise of plan §1
+holds once the wrapper is treated as the pure container it is.
+
+### Remaining gates (this continuation)
+
+1. 100-chapter production canary on `Test_ChiXinXunTian_100ch.epub`
+   (100/100 flat, 7,665 units) with budget 3,000,000 — running.
+2. Stop/resume rebilling check (chapter_limit 50 → 100, same cache).
+3. 30-chapter stratified quality gate with blind pairwise judging
+   (DeepSeek-only, per the user's model override).
+4. Final doc + default decision (plan §10).
