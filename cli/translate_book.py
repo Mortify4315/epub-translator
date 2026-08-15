@@ -47,6 +47,64 @@ class BudgetExceeded(RuntimeError):
         self.used = used
 
 
+class UsageBudgetGuard:
+    """Stop a one-pass request as soon as the LLM streams over budget.
+
+    ``epub_translator.LLM`` reports actual provider usage through its private
+    Statistics sink while each response stream is consumed. The public
+    progress callback only runs after headers or whole chapters, so it cannot
+    bound a multi-group one-pass chapter. Patch that sink for the duration of
+    the run, then restore it even when a BudgetExceeded interrupts a stream.
+    A final ``check`` remains a compatibility fallback for test doubles or a
+    future engine that does not expose the sink.
+    """
+
+    def __init__(self, budget: int, *llms) -> None:
+        self.budget = budget
+        self.llms = tuple(llm for llm in llms if llm is not None)
+        self._patched: list[tuple[object, object, object]] = []
+
+    def used(self) -> int:
+        return sum(getattr(llm, "total_tokens", 0) for llm in self.llms)
+
+    def check(self) -> None:
+        used = self.used()
+        if used > self.budget:
+            raise BudgetExceeded(self.budget, used)
+
+    def __enter__(self):
+        # Check before patching: a raise here would skip __exit__ and leak
+        # patched sinks, so the pre-check must run while nothing is patched.
+        # Fresh LLMs report zero usage, so this only guards misuse.
+        self.check()
+        for llm in self.llms:
+            statistics = getattr(llm, "_statistics", None)
+            submit_usage = getattr(statistics, "submit_usage", None)
+            if not callable(submit_usage):
+                continue
+
+            def checked_submit_usage(usage, submit_usage=submit_usage):
+                submit_usage(usage)
+                self.check()
+
+            try:
+                statistics.submit_usage = checked_submit_usage
+            except (AttributeError, TypeError):
+                # Compatibility fallback: check at the next progress point and
+                # after the translator returns. Current engine Statistics is
+                # instance-patchable, so production one-pass checks per stream.
+                continue
+            self._patched.append((statistics, submit_usage, checked_submit_usage))
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        for statistics, submit_usage, checked_submit_usage in reversed(self._patched):
+            if getattr(statistics, "submit_usage", None) is checked_submit_usage:
+                statistics.submit_usage = submit_usage
+        self._patched.clear()
+        return False
+
+
 class ChapterLimitReached(RuntimeError):
     """Raised by the progress callback when the configured chapter limit is
     reached. Unlike BudgetExceeded the partial output is KEPT (finalized by
@@ -297,11 +355,10 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
     headers = count_headers(source_for_translation)
     chapter_limit = get_chapter_limit()
     budget = get_token_budget(source_path.name)
+    usage_budget_guard = UsageBudgetGuard(budget, translation_llm, fill_llm)
 
     def budget_aware_progress(frac: float) -> None:
-        used = translation_llm.total_tokens + (fill_llm.total_tokens if fill_llm else 0)
-        if used > budget:
-            raise BudgetExceeded(budget, used)
+        usage_budget_guard.check()
         if on_progress:
             on_progress(frac)
 
@@ -311,18 +368,20 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
     chapter_limited = False
     try:
         if pipeline == "one-pass":
-            load_one_pass_translator()(
-                source_path=str(source_for_translation),
-                target_path=str(target_path),
-                target_language=language.ENGLISH,
-                user_prompt=prompt,
-                translation_llm=translation_llm,
-                max_group_tokens=get_max_group_tokens(),
-                max_retries=get_max_retries(),
-                strict=get_strict_one_pass(),
-                chapter_limit=chapter_limit,
-                on_progress=on_chapter_progress,
-            )
+            with usage_budget_guard:
+                load_one_pass_translator()(
+                    source_path=str(source_for_translation),
+                    target_path=str(target_path),
+                    target_language=language.ENGLISH,
+                    user_prompt=prompt,
+                    translation_llm=translation_llm,
+                    max_group_tokens=get_max_group_tokens(),
+                    max_retries=get_max_retries(),
+                    strict=get_strict_one_pass(),
+                    chapter_limit=chapter_limit,
+                    on_progress=on_chapter_progress,
+                )
+                usage_budget_guard.check()
         else:
             translate(
                 source_path=str(source_for_translation),
