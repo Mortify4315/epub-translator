@@ -380,6 +380,7 @@ def run_translation(source_path: Path, on_progress=None) -> dict:
                     strict=get_strict_one_pass(),
                     chapter_limit=chapter_limit,
                     on_progress=on_chapter_progress,
+                    group_concurrency=get_concurrency(),
                 )
                 usage_budget_guard.check()
         else:

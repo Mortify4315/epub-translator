@@ -33,6 +33,8 @@ import dataclasses
 import difflib
 import importlib.metadata
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -334,12 +336,35 @@ def _validation_errors(units: list[TranslationUnit], parsed: ParsedGroup, issues
     return "\n".join(lines)
 
 
+# OnePassReport counters and lists are mutated from translate_units, which
+# runs on worker threads when group dispatch is parallel (see
+# _translate_chapter). All report mutations therefore go through these
+# lock-protected helpers so a parallel run keeps exact, race-free numbers.
+_REPORT_LOCK = threading.Lock()
+
+
+def _report_bump(report: OnePassReport | None, attr: str, n: int = 1) -> None:
+    """Thread-safe increment of one integer field on the shared report."""
+    if report is None:
+        return
+    with _REPORT_LOCK:
+        setattr(report, attr, getattr(report, attr) + n)
+
+
+def _report_append(report: OnePassReport | None, attr: str, item) -> None:
+    """Thread-safe append to one list field on the shared report."""
+    if report is None:
+        return
+    with _REPORT_LOCK:
+        getattr(report, attr).append(item)
+
+
 def _record_issues(report: OnePassReport | None, issues: list[UnitIssue]) -> None:
     if report is None:
         return
     for issue in issues:
         if issue.kind in ("cjk", "source_copy"):
-            report.cjk_remnants.append({
+            _report_append(report, "cjk_remnants", {
                 "index": issue.index,
                 "kind": issue.kind,
                 "message": issue.message,
@@ -380,16 +405,14 @@ def translate_units(
 
     for attempt in range(full_retries + 1):
         response = _request(llm, request, seed)
-        if report is not None:
-            report.requests += 1
+        _report_bump(report, "requests")
         parsed = parse_group(response, len(units))
         issues = validate_group(units, parsed)
         _record_issues(report, issues)
         if not issues:
             return dict(parsed.translations)
         if attempt < full_retries:
-            if report is not None:
-                report.full_group_retries += 1
+            _report_bump(report, "full_group_retries")
             request = request + "\n\n" + _validation_errors(units, parsed, issues)
 
     failed_indices = {issue.index for issue in issues}
@@ -407,9 +430,8 @@ def translate_units(
             dataclasses.replace(u, index=k) for k, u in enumerate(orig_failed, 1)
         ]
         subset_response = _request(llm, prompt + "\n\n" + render_group(subset_units), seed)
-        if report is not None:
-            report.requests += 1
-            report.subset_requests += 1
+        _report_bump(report, "requests")
+        _report_bump(report, "subset_requests")
         subset_parsed = parse_group(subset_response, len(subset_units))
         subset_issues = validate_group(subset_units, subset_parsed)
         _record_issues(report, subset_issues)
@@ -426,9 +448,8 @@ def translate_units(
     for unit in failed:
         single = dataclasses.replace(unit, index=1)
         response = _request(llm, prompt + "\n\n" + render_group([single]), seed)
-        if report is not None:
-            report.requests += 1
-            report.individual_requests += 1
+        _report_bump(report, "requests")
+        _report_bump(report, "individual_requests")
         single_parsed = parse_group(response, 1)
         single_issues = validate_group([single], single_parsed)
         _record_issues(report, single_issues)
@@ -446,13 +467,12 @@ def translate_units(
         # Compatibility mode: preserve the source text, emit the
         # on_fill_failed-compatible event, and record the failure.
         translations[unit.index] = unit.source_text
-        if report is not None:
-            report.fallback_units += 1
-            report.failures.append({
-                "index": unit.index,
-                "kinds": sorted({i.kind for i in single_issues}) or ["invalid"],
-                "message": error_text,
-            })
+        _report_bump(report, "fallback_units")
+        _report_append(report, "failures", {
+            "index": unit.index,
+            "kinds": sorted({i.kind for i in single_issues}) or ["invalid"],
+            "message": error_text,
+        })
         if on_protocol_failed is not None:
             on_protocol_failed(FillFailedEvent(
                 error_message=f"item {unit.index}: {error_text}",
@@ -546,13 +566,67 @@ def _translate_chapter(
     on_protocol_failed,
     report: OnePassReport,
     count_tokens,
+    group_concurrency: int = 1,
 ) -> bool:
     """Translate all groups of one chapter and reinsert positionally.
-    Returns True when the document changed (and must be written back)."""
+    Returns True when the document changed (and must be written back).
+
+    With ``group_concurrency > 1`` groups are dispatched through a bounded
+    thread pool: each group is one independent request (with its own
+    bounded repair ladder), so N groups can be in flight at once — the
+    same concurrency model the two-pass engine already uses. The repair
+    ladder, validation, and report accounting are unchanged; reinsertion
+    stays serial and positional in group order, so XML element mutation
+    is single-threaded. ``translate_units`` is safe to call from worker
+    threads (report mutations are lock-protected)."""
+    groups = [g for g in group_units(units, max_group_tokens, count_tokens) if g]
+    concurrency = max(1, int(group_concurrency or 1))
+    if concurrency > 1 and len(groups) > 1:
+        changed = False
+        jobs = []
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            for group in groups:
+                report.groups += 1
+                local = [dataclasses.replace(u, index=k) for k, u in enumerate(group, 1)]
+                future = pool.submit(
+                    translate_units, local, prompt, llm,
+                    max_retries=max_retries, strict=strict, seed=seed,
+                    on_protocol_failed=on_protocol_failed, report=report,
+                )
+                jobs.append((local, future))
+            # Collect in group order; a strict abort (OnePassProtocolError)
+            # or transport failure raised in a worker is re-raised after
+            # the executor has drained the remaining in-flight requests.
+            # Every future's exception is retrieved (no unretrieved
+            # warnings); groups after the failing one are not reinserted,
+            # mirroring the serial abort semantics.
+            first_error: BaseException | None = None
+            for local, future in jobs:
+                if first_error is not None:
+                    try:
+                        future.result()
+                    except BaseException:  # noqa: BLE001 - drain only
+                        pass
+                    continue
+                try:
+                    translations = future.result()
+                except BaseException as exc:  # noqa: BLE001 - re-raise after drain
+                    first_error = exc
+                    continue
+                for unit in local:
+                    text = translations.get(unit.index)
+                    if text is None:
+                        continue
+                    report.translated_units += 1
+                    if text != unit.source_text:
+                        _set_unit_text(unit.target_element, text)
+                        changed = True
+            if first_error is not None:
+                raise first_error
+        return changed
+
     changed = False
-    for group in group_units(units, max_group_tokens, count_tokens):
-        if not group:
-            continue
+    for group in groups:
         report.groups += 1
         local = [dataclasses.replace(u, index=k) for k, u in enumerate(group, 1)]
         translations = translate_units(
@@ -718,6 +792,7 @@ def translate_one_pass(
     chapter_limit,
     on_progress=None,
     on_protocol_failed=None,
+    group_concurrency=None,
 ):
     """Translate an EPUB with the one-pass numbered protocol.
 
@@ -733,6 +808,13 @@ def translate_one_pass(
     is rerouted through one corrective two-pass re-run and then rejected
     with OnePassProtocolError, and in non-strict mode the remnants are
     recorded in the report and surfaced through on_protocol_failed.
+
+    ``group_concurrency`` (default 1, serial) bounds parallel group
+    dispatch within each chapter: groups are independent numbered
+    requests, so the same concurrency the two-pass engine uses applies
+    here without changing the protocol, the repair ladder, or positional
+    reinsertion. Callers that already know the configured engine
+    concurrency (cli/config, the benchmark harness) pass it explicitly.
     """
     source = Path(source_path).resolve()
     target = Path(target_path).resolve()
@@ -901,6 +983,7 @@ def translate_one_pass(
                         max_retries=max_retries, strict=strict,
                         on_protocol_failed=on_protocol_failed, report=report,
                         count_tokens=count_tokens,
+                        group_concurrency=group_concurrency,
                     )
                     if changed:
                         with zip.replace(path) as out:

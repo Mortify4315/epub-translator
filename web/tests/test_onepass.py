@@ -18,6 +18,8 @@ Covers, in order:
 """
 import re
 import sys
+import threading
+import time
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -1115,3 +1117,115 @@ def test_report_round_trip_after_success(tmp_path):
     assert report.target == tgt
     assert report.translated_units == 2
     assert report.requests >= 3  # toc + metadata + chapters
+
+
+# --------------------------------------------------------------------------
+# Parallel group dispatch (group_concurrency)
+# --------------------------------------------------------------------------
+
+
+def _probe_handler(base):
+    """Wrap a handler with an in-flight counter so tests can observe how
+    many requests the engine keeps open at once — deterministic, with a
+    short sleep only to widen the overlap window."""
+
+    state = {"lock": threading.Lock(), "in_flight": 0, "max_in_flight": 0}
+
+    def handler(prompt):
+        with state["lock"]:
+            state["in_flight"] += 1
+            state["max_in_flight"] = max(state["max_in_flight"], state["in_flight"])
+        time.sleep(0.05)
+        try:
+            return base(prompt)
+        finally:
+            with state["lock"]:
+                state["in_flight"] -= 1
+
+    return handler, state
+
+
+_PARALLEL_PARAS = [
+    "甲乙丙丁", "甲乙丙丁戊", "甲乙丙丁戊己",
+    "甲乙丙丁戊己庚", "甲乙丙丁戊己庚辛", "甲乙丙丁戊己庚辛壬",
+]
+
+
+def test_parallel_group_dispatch_concurrent_and_positional(tmp_path):
+    """group_concurrency>1 dispatches chapter groups through a bounded
+    pool: the fake LLM observes >=2 simultaneous requests, every unit is
+    translated exactly once, and reinsertion stays positional (each
+    paragraph element receives its own group's translation, in order)."""
+    src = tmp_path / "src.epub"
+    tgt = tmp_path / "out.epub"
+    _build_epub(src, [_PARALLEL_PARAS], with_nav=False)
+    handler, state = _probe_handler(_length_handler("G"))
+    fake = _FakeLLM(handler=handler)
+    report = translate_one_pass(
+        src, tgt, "en", "prompt", fake,
+        max_group_tokens=40, max_retries=2, strict=True, chapter_limit=0,
+        group_concurrency=3,
+    )
+    # 6 units of 4..9 chars at 1 token/char (+2 separator each), budget 40
+    # -> groups (4,5,6), (7,8), (9) = 3 chapter groups.
+    assert report.groups == 3
+    assert report.translated_units == 6
+    # Metadata + the 3 chapter groups (no nav -> no TOC group).
+    assert report.requests == report.groups + 1
+    assert report.fallback_units == 0
+    assert report.cjk_remnants == []
+    # Concurrency: more than one request in flight at the same time.
+    assert state["max_in_flight"] >= 2
+    # Positional integrity: paragraph i carries exactly G{len(paras[i])}.
+    content = _read_chapter_raw(tgt, "chap1.xhtml")
+    assert re.findall(r"<p>(.*?)</p>", content) == ["G4", "G5", "G6", "G7", "G8", "G9"]
+    for para in _PARALLEL_PARAS:
+        assert para not in content
+
+
+def test_parallel_default_remains_serial(tmp_path):
+    """Without group_concurrency the engine keeps the historical serial
+    dispatch: the probe never observes two in-flight requests."""
+    src = tmp_path / "src.epub"
+    tgt = tmp_path / "out.epub"
+    _build_epub(src, [_PARALLEL_PARAS], with_nav=False)
+    handler, state = _probe_handler(_length_handler("G"))
+    fake = _FakeLLM(handler=handler)
+    report = translate_one_pass(
+        src, tgt, "en", "prompt", fake,
+        max_group_tokens=40, max_retries=2, strict=True, chapter_limit=0,
+    )
+    assert state["max_in_flight"] == 1
+    assert report.groups == 3
+    assert report.translated_units == 6
+    assert report.fallback_units == 0
+
+
+def test_parallel_strict_abort_propagates_and_drains(tmp_path):
+    """A strict protocol failure inside a worker re-raises from the main
+    thread (executor drained, no deadlock), and the aborted chapter keeps
+    its source text in the finalized archive — same contract as the
+    serial strict abort. Metadata stays valid so the failure is
+    provably raised by the parallel chapter path."""
+    src = tmp_path / "src.epub"
+    tgt = tmp_path / "out.epub"
+    _build_epub(src, [_PARALLEL_PARAS], with_nav=False)
+
+    def handler(prompt):
+        if "测试书名" in prompt:
+            return _auto_handler("T")(prompt)
+        return "Sorry, I cannot help with that."
+
+    fake = _FakeLLM(handler=handler)
+    with pytest.raises(OnePassProtocolError) as err:
+        translate_one_pass(
+            src, tgt, "en", "prompt", fake,
+            max_group_tokens=40, max_retries=2, strict=True, chapter_limit=0,
+            group_concurrency=4,
+        )
+    assert err.value.report is not None
+    assert err.value.report.requests > 0
+    assert err.value.report.fallback_units == 0
+    assert err.value.report.cjk_remnants == []
+    # The aborted chapter was never written as translated: source stays.
+    assert "甲乙丙丁" in _read_chapter_raw(tgt, "chap1.xhtml")

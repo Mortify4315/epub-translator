@@ -1717,6 +1717,7 @@ def _default_runner(job: JobSpec, collector: MetricsCollector) -> Mapping[str, A
                 strict=job.settings.strict,
                 chapter_limit=job.chapter_limit,
                 on_protocol_failed=on_protocol_failed,
+                group_concurrency=job.settings.concurrency,
             )
     except Exception as exc:  # noqa: BLE001 - report runner failures without masking telemetry
         pending = exc
