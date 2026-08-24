@@ -29,3 +29,25 @@ def test_glossary_edit_missing_404(client, sandbox):
 
 def test_glossary_term_validation(client, sandbox):
     assert client.post("/api/glossary/global/term", json={"src": "", "dst": "x"}).status_code == 400
+
+
+def test_glossary_export_and_merge_import(client, sandbox):
+    import io
+    import json
+
+    (sandbox["glossaries"] / "global.json").write_text(
+        '{"道": "Dao"}', encoding="utf-8")
+    exported = client.get("/api/glossary/global/export")
+    assert exported.status_code == 200
+    assert exported.mimetype == "application/json"
+    assert json.loads(exported.data)["道"] == "Dao"
+    imported = client.post(
+        "/api/glossary/global/import",
+        data={"file": (io.BytesIO('{"道":"Way","丹田":"dantian"}'.encode()),
+                       "terms.json")},
+        content_type="multipart/form-data",
+    )
+    assert imported.status_code == 200
+    assert imported.get_json() == {"added": 1, "skipped": 1}
+    terms = client.get("/api/glossary").get_json()[0]["terms"]
+    assert terms == {"丹田": "dantian", "道": "Dao"}

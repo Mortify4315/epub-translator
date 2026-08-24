@@ -1,6 +1,6 @@
 # Web Novel EPUB Translator
 
-Translate Chinese web novels (EPUB) into English using the **DeepSeek** API, with a shared + per-novel glossary for consistent names, skills, and terms.
+Translate Chinese web novels (EPUB) into English through any OpenAI-compatible provider, with a shared + per-novel glossary for consistent names, skills, and terms. The local browser and terminal interfaces share the same engine and data.
 
 Two frontends live in this repository, sharing the same core:
 
@@ -19,8 +19,14 @@ Two frontends live in this repository, sharing the same core:
 
 1. Install **Python 3.13** (3.11–3.13 all work) and tick **"Add python.exe to PATH"**.
 2. Double-click `cli\run.bat` or `web\run.bat`. First run installs the required packages automatically (each frontend keeps its own `.venv`).
-3. Paste your **DeepSeek API key** on first use (stored locally in `cli/settings.json`, never committed).
+3. Choose a provider on first use. Most providers need an API key, stored locally in `cli/settings.json` and never committed. The local 9Router preset works without one by default.
 4. Drop `.epub` files into `cli/books/`.
+
+The WebUI uses the **Novel Press** production workflow: prepare terminology, estimate and translate, then verify consistency. It includes light/dark themes, live resumable job progress, finished outputs, glossary import/export, and a mobile layout. The TUI exposes the same readiness, provider, pipeline, and run-limit controls in a terminal-friendly form.
+
+## Local 9Router
+
+Select **9Router (local)** in WebUI or TUI settings to use `http://localhost:20128/v1`. The preset offers `fusion-panel`, `qd/auto`, and `qd/ultimate`; its API key is optional. You can override it with `NINEROUTER_BASE_URL`, `NINEROUTER_MODEL`, or `NINEROUTER_API_KEY`.
 
 ## For developers
 

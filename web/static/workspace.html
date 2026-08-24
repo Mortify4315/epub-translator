@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#1b2822">
+  <title>Novel Press | EPUB Translator</title>
+  <link rel="stylesheet" href="/static/pressroom.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to workspace</a>
+  <svg class="svg-sprite" aria-hidden="true">
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21.5zM20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5a2.5 2.5 0 0 1 2.5 2.5z"/></symbol>
+    <symbol id="i-translate" viewBox="0 0 24 24"><path d="M4 5h9M8.5 3v2M6 5c.5 3 2.3 5.7 5 7.3M12 7c-1.2 2.6-3.5 4.9-6.5 6M14 20l3.5-8 3.5 8M15.3 17h4.4"/></symbol>
+    <symbol id="i-glossary" viewBox="0 0 24 24"><path d="M5 4h12a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2zM8 8h8M8 12h6M8 16h4"/></symbol>
+    <symbol id="i-scan" viewBox="0 0 24 24"><path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4M8 12h8M12 8v8"/></symbol>
+    <symbol id="i-quality" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6M4 20h16"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M6 14v6"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M5 20h14"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5M5 20h14"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7z"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><path d="M7 7h10v10H7z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 15.5A8 8 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5z"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="m11 12 8-8M16 7l2 2M14 9l2 2"/></symbol>
+  </svg>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <svg class="brand-icon" aria-hidden="true"><use href="#i-book"></use></svg>
+        <div><div class="brand-name">Novel Press</div><div class="brand-subtitle">EPUB production desk</div></div>
+      </div>
+      <nav id="tabs" class="nav-list" aria-label="Workspace"></nav>
+      <div class="sidebar-footer">
+        <button id="api-state" class="setup-state" type="button">Checking setup…</button>
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Switch color theme">
+          <svg class="icon theme-icon-light" aria-hidden="true"><use href="#i-sun"></use></svg>
+          <svg class="icon theme-icon-dark" aria-hidden="true"><use href="#i-moon"></use></svg><span>Theme</span>
+        </button>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="workspace-header">
+        <div><h1 id="view-title">Translate a book</h1><p id="view-description">Prepare the source, review the press estimate, then start a resumable run.</p></div>
+        <div class="workspace-summary" aria-label="Library summary"><span><strong id="summary-books">0</strong> sources</span><span><strong id="summary-output">0</strong> finished</span></div>
+      </header>
+
+      <main id="main-content" tabindex="-1">
+        <section id="view-translate" class="view" aria-labelledby="view-title">
+          <ol class="workflow" aria-label="Translation workflow"><li class="active"><span>1</span>Prepare</li><li><span>2</span>Translate</li><li><span>3</span>Verify</li></ol>
+          <section class="sheet source-sheet" aria-labelledby="source-heading">
+            <div class="sheet-heading">
+              <div><h2 id="source-heading">Book on press</h2><p>Select an EPUB already in your library or add a new one.</p></div>
+              <label class="btn secondary" for="upload-input"><svg class="icon" aria-hidden="true"><use href="#i-upload"></use></svg>Add EPUB</label>
+              <input id="upload-input" type="file" accept=".epub,application/epub+zip" hidden>
+            </div>
+            <div class="field field-wide"><label for="book-select">Source book</label><select id="book-select" class="grow"></select><p class="field-note">Files stay on this computer. A rerun reuses completed cache entries.</p></div>
+          </section>
+
+          <section id="estimate" class="sheet hidden" aria-labelledby="estimate-heading">
+            <div class="sheet-heading"><div><h2 id="estimate-heading">Press estimate</h2><p>Review the paid work before the run starts.</p></div><span id="estimate-readiness" class="stamp">Ready</span></div>
+            <dl class="estimate-grid"><div><dt>Chapters</dt><dd id="est-chapters">Not calculated</dd></div><div><dt>Estimated tokens</dt><dd id="est-tokens">Not calculated</dd></div><div><dt>Estimated cost</dt><dd id="est-cost">Not calculated</dd></div><div><dt>Model</dt><dd id="est-model">Not selected</dd></div></dl>
+            <div class="run-strip"><div><strong id="run-pipeline">One-pass pipeline</strong><span id="run-limit">All chapters · resumable cache</span></div><button id="start-translate" class="btn primary" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#i-play"></use></svg>Start translation</button></div>
+          </section>
+
+          <section id="translate-job" class="sheet job-sheet hidden" aria-labelledby="job-heading">
+            <div class="sheet-heading"><div><h2 id="job-heading">Live press run</h2><p id="translate-chapters" class="chapter">Preparing chapters…</p></div><button id="stop-translate" class="btn danger hidden" type="button"><svg class="icon" aria-hidden="true"><use href="#i-stop"></use></svg>Stop safely</button></div>
+            <div id="translate-progress" class="progress" role="progressbar" aria-label="Translation progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="translate-bar" class="bar"></div></div>
+            <div class="progress-copy"><p id="translate-msg">Starting…</p><p id="translate-heartbeat" class="muted hidden"></p></div>
+            <details class="run-log"><summary>Run log</summary><div id="translate-log" class="log" aria-live="polite"></div></details>
+            <div id="translate-result" class="result-strip hidden" aria-live="polite"><p id="translate-summary"></p><a id="download-link" class="btn secondary" href="#"><svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg>Download EPUB</a><p id="cache-warning" class="notice danger-notice hidden">The selected pipeline cache was cleared. The sibling pipeline cache was preserved.</p></div>
+          </section>
+
+          <section class="sheet output-sheet" aria-labelledby="output-heading"><div class="sheet-heading"><div><h2 id="output-heading">Finished editions</h2><p>Recent EPUBs available from the local output folder.</p></div></div><div id="output-list" class="output-list"></div></section>
+        </section>
+
+        <section id="view-glossary" class="view hidden" aria-labelledby="view-title">
+          <section class="sheet" aria-labelledby="glossary-heading">
+            <div class="sheet-heading"><div><h2 id="glossary-heading">Terminology desk</h2><p>Keep names, skills, places, and cultivation terms consistent.</p></div><button id="add-term-btn" class="btn primary" type="button">Add term</button></div>
+            <div class="toolbar glossary-toolbar">
+              <div class="field"><label for="scope-select">Glossary</label><select id="scope-select"></select></div>
+              <div class="field search-field"><label for="term-search">Find a term</label><span class="input-icon-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg><input id="term-search" type="search" placeholder="Chinese or English"></span></div>
+              <div class="toolbar-actions"><a id="export-glossary" class="btn quiet" href="#">Export JSON</a><label class="btn quiet" for="import-glossary">Import JSON</label><input id="import-glossary" type="file" accept="application/json,.json" hidden></div>
+            </div>
+            <p class="notice">Glossary edits invalidate the affected book cache so the next run can apply the new terminology.</p>
+            <div id="add-term-form" class="inline-editor hidden" aria-labelledby="term-form-title"><h3 id="term-form-title">New term</h3><div class="field"><label for="new-src">Chinese source</label><input id="new-src" autocomplete="off" placeholder="e.g. 丹田"></div><div class="field"><label for="new-dst">English translation</label><input id="new-dst" autocomplete="off" placeholder="e.g. dantian"></div><div class="inline-actions"><button id="save-term-btn" class="btn primary" type="button">Save term</button><button id="cancel-term-btn" class="btn quiet" type="button">Cancel</button></div></div>
+            <div class="table-meta"><strong id="term-count">0 terms</strong><span id="term-filter-state"></span></div>
+            <div class="table-wrap"><table id="term-table"><thead><tr><th scope="col">Chinese</th><th scope="col">English</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody></tbody></table></div>
+            <div id="glossary-empty" class="empty-state hidden"><strong>No terms here yet.</strong><span>Add a term or import a JSON glossary to start this edition's terminology sheet.</span></div>
+          </section>
+        </section>
+
+        <section id="view-scan" class="view hidden" aria-labelledby="view-title">
+          <section class="sheet" aria-labelledby="scan-heading">
+            <div class="sheet-heading"><div><h2 id="scan-heading">Term discovery</h2><p>Find repeated names and concepts before they drift across chapters.</p></div></div>
+            <div class="action-layout"><div class="field field-wide"><label for="scan-book">Book to scan</label><select id="scan-book"></select></div><button id="start-scan" class="btn primary" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#i-scan"></use></svg>Scan book</button></div>
+            <div id="scan-progress" class="job-area hidden"><div id="scan-progressbar" class="progress" role="progressbar" aria-label="Term scan progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="scan-bar" class="bar"></div></div><p id="scan-msg"></p></div>
+            <p id="scan-heartbeat" class="muted hidden"></p><button id="stop-scan" class="btn danger hidden" type="button">Stop scan</button>
+            <details id="scan-log-wrap" class="run-log hidden"><summary>Scan log</summary><div id="scan-log" class="log" aria-live="polite"></div></details>
+            <div id="scan-result" class="scan-result hidden"><p id="scan-summary"></p><div id="scan-list" class="scan-list"></div><button id="accept-scan" class="btn primary" type="button" disabled>Add selected to glossary</button></div>
+          </section>
+        </section>
+
+        <section id="view-qa" class="view hidden" aria-labelledby="view-title">
+          <section class="sheet" aria-labelledby="qa-heading"><div class="sheet-heading"><div><h2 id="qa-heading">Consistency proof</h2><p>Compare the finished edition against its glossary without spending API tokens.</p></div></div><div class="qa-grid"><div class="field"><label for="qa-source">Source EPUB</label><select id="qa-source"></select></div><div class="field"><label for="qa-target">Finished EPUB</label><select id="qa-target"></select></div><button id="run-qa" class="btn primary" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#i-quality"></use></svg>Run proof</button></div><div id="qa-result" class="qa-result hidden" aria-live="polite"></div></section>
+        </section>
+
+        <section id="view-settings" class="view hidden" aria-labelledby="view-title">
+          <section class="sheet settings-sheet" aria-labelledby="settings-heading">
+            <div class="sheet-heading"><div><h2 id="settings-heading">Press configuration</h2><p>Defaults for provider access, translation behavior, and run limits.</p></div></div>
+            <form id="settings-form">
+              <fieldset><legend>Provider</legend><div class="settings-grid">
+                <div class="field"><label for="setting-provider">Provider</label><select id="setting-provider"></select></div>
+                <div class="field"><label for="setting-model">Model</label><input id="setting-model" list="model-options" placeholder="Any compatible model"><datalist id="model-options"></datalist></div>
+                <div class="field field-wide"><label for="setting-base">API base URL <span>optional override</span></label><input id="setting-base" type="url" placeholder="Provider default"></div>
+                <div class="field field-wide"><label for="setting-key">API key</label><div class="key-row"><input id="setting-key" type="password" placeholder="Unchanged" autocomplete="off"><button id="toggle-key" class="btn quiet" type="button" aria-pressed="false">Show</button><button id="save-key" class="btn secondary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-key"></use></svg>Save key</button></div><p class="field-note" id="setting-key-hint"></p></div>
+              </div></fieldset>
+              <fieldset><legend>Translation</legend><div class="settings-grid">
+                <div class="field"><label for="setting-pipeline">Pipeline</label><select id="setting-pipeline"><option value="one-pass">One-pass (recommended)</option><option value="two-pass">Two-pass (legacy cache)</option></select></div>
+                <div class="field"><label for="setting-concurrency">Parallel requests</label><input id="setting-concurrency" type="number" min="1" max="64"></div>
+                <div class="field"><label for="setting-thinking">Translate mode</label><select id="setting-thinking"><option value="disabled">Fast (recommended)</option><option value="enabled">Accurate (slower)</option></select></div>
+                <div class="field"><label for="setting-fill">Structure mapping</label><select id="setting-fill"><option value="adaptive">Adaptive (recommended)</option><option value="enabled">Thinking on</option><option value="disabled">Fast</option></select></div>
+                <label class="check-field field-wide" for="setting-strict-one-pass"><input id="setting-strict-one-pass" type="checkbox"><span><strong>Strict one-pass protocol</strong><small>Stop a chapter when numbered output cannot be repaired.</small></span></label>
+                <p class="notice field-wide">One-pass measured roughly 6–8× cheaper in the acceptance benchmark and uses an isolated cache. Choose two-pass only for books with substantial legacy cache.</p><p class="notice danger-notice hidden field-wide" id="setting-thinking-warn"></p>
+              </div></fieldset>
+              <fieldset><legend>Run limits</legend><div class="settings-grid"><div class="field"><label for="setting-chapter-limit">Chapters per run <span>0 = all</span></label><input id="setting-chapter-limit" type="number" min="0"></div><div class="field"><label for="setting-group-tokens">Max group tokens</label><input id="setting-group-tokens" type="number" min="500"></div></div></fieldset>
+              <div class="settings-actions"><button id="save-settings" class="btn primary" type="submit">Save configuration</button><span>Cache-affecting changes apply to the next run.</span></div>
+            </form>
+          </section>
+        </section>
+      </main>
+    </div>
+  </div>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  <script src="/static/pressroom.js"></script>
+</body>
+</html>

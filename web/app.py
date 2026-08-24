@@ -25,8 +25,8 @@ def handle_error(exc):
 
 @app.get("/")
 def index():
-    if (Path(app.static_folder) / "index.html").is_file():
-        return send_from_directory("static", "index.html")
+    if (Path(app.static_folder) / "workspace.html").is_file():
+        return send_from_directory("static", "workspace.html")
     return (
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
         "<title>Web Novel EPUB Translator</title></head><body>"
@@ -62,6 +62,7 @@ def bootstrap():
         "out": out,
         "glossaries": glossaries,
         "settings": settings_payload(),
+        "readiness": core.config.validate_ready(),
     })
 
 

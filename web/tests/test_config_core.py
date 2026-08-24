@@ -171,3 +171,11 @@ def test_validate_ready_missing_model(tmp_path, monkeypatch):
     })
     problems = config.validate_ready()
     assert any("model" in p for p in problems)
+
+
+def test_9router_is_ready_without_stored_key(tmp_path, monkeypatch):
+    _fresh_settings(tmp_path, monkeypatch, {"provider": "9router"})
+    assert config.get_base_url() == "http://localhost:20128/v1"
+    assert config.get_model() == "fusion-panel"
+    assert config.get_api_key() == "local-router"
+    assert config.validate_ready() == []

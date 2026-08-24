@@ -207,6 +207,20 @@ PROVIDER_PRESETS = {
         "prices": {},
         "default_price": (0.20, 1.20),
     },
+    "9router": {
+        "label": "9Router (local)",
+        "base_url": "http://localhost:20128/v1",
+        "env_key": "NINEROUTER_API_KEY",
+        "env_base": "NINEROUTER_BASE_URL",
+        "env_model": "NINEROUTER_MODEL",
+        "thinking": False,
+        "api_key_optional": True,
+        "models": ["fusion-panel", "qd/auto", "qd/ultimate"],
+        "prices": {},
+        # The router can dispatch to models with different billing. Keep the
+        # estimator conservative until the user supplies a provider price map.
+        "default_price": (0.14, 0.28),
+    },
     "custom": {
         "label": "Custom (any OpenAI-compatible API)",
         "base_url": "",
@@ -267,6 +281,11 @@ def get_api_key() -> str:
         owner = str(settings.get("api_key_provider", "deepseek")).strip()
         if owner == get_provider():
             key = str(settings.get("api_key", "")).strip()
+    # The OpenAI client requires a non-empty string even when a local router
+    # does not authenticate. 9Router's local endpoint accepts this sentinel
+    # and no secret needs to be stored.
+    if not key and info.get("api_key_optional"):
+        return "local-router"
     return key
 
 

@@ -99,6 +99,21 @@ def test_settings_custom_provider_accepted_with_base_url(client, sandbox):
     assert data["base_url"] == "https://my-relay.example/v1"
 
 
+def test_9router_provider_needs_no_key(client, sandbox):
+    resp = client.post("/api/settings", json={
+        "provider": "9router",
+        "base_url": "http://localhost:20128/v1",
+        "model": "fusion-panel",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["provider"] == "9router"
+    assert data["api_key_optional"] is True
+    assert data["api_key_set"] is True
+    assert data["api_key_configured"] is False
+    assert data["api_key_masked"] == "(not required)"
+
+
 def test_settings_concurrency_accepts_32(client, sandbox):
     # The speed-experiment value (32) must survive a web save (regression for
     # the old silent 32 -> 16 clamp).

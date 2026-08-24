@@ -1,9 +1,21 @@
 from pathlib import Path
 
 import questionary
+import questionary.styles as questionary_styles
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
+from rich.table import Table
+from rich.theme import Theme
 
 import qa_check as qa_mod
 import scan_glossary as scan_mod
@@ -15,17 +27,22 @@ from config import (
     PROVIDER_PRESETS,
     get_api_key,
     get_base_url,
+    get_chapter_limit,
     get_concurrency,
     get_extra_body,
     get_fill_thinking,
     get_max_retries,
+    get_max_group_tokens,
     get_model,
+    get_pipeline,
     get_provider,
     get_provider_info,
     get_token_budget,
+    get_strict_one_pass,
     load_settings,
     save_settings,
     set_api_key,
+    validate_ready,
 )
 from glossary import (
     GLOBAL_NAME,
@@ -36,7 +53,56 @@ from glossary import (
     save_glossary,
 )
 
-console = Console()
+PRESS_THEME = Theme({
+    "press.brand": "bold #e76f51",
+    "press.accent": "#e9c46a",
+    "press.good": "#70c1a2",
+    "press.muted": "#8d9c94",
+    "press.danger": "bold #ff7b72",
+})
+PROMPT_STYLE = questionary.Style([
+    ("qmark", "fg:#e76f51 bold"),
+    ("question", "bold"),
+    ("answer", "fg:#70c1a2 bold"),
+    ("pointer", "fg:#e9c46a bold"),
+    ("highlighted", "fg:#e9c46a bold"),
+    ("selected", "fg:#70c1a2"),
+    ("instruction", "fg:#7f8f86"),
+])
+# Questionary merges every prompt with this module-level default. Replacing it
+# once gives every nested workflow the same visual language without coupling
+# business logic to presentation options.
+questionary_styles.DEFAULT_STYLE = PROMPT_STYLE
+console = Console(theme=PRESS_THEME, highlight=False)
+
+
+def app_header(section: str = "Production desk") -> None:
+    header = Table.grid(expand=True)
+    header.add_column(ratio=1)
+    header.add_column(justify="right")
+    header.add_row(
+        "[press.brand]NOVEL PRESS[/press.brand]  [press.muted]EPUB translator[/press.muted]",
+        f"[press.muted]{section}[/press.muted]",
+    )
+    console.print(Panel(header, border_style="press.muted", padding=(0, 1)))
+
+
+def status_overview() -> Table:
+    books = list_books()
+    outputs = list_translated()
+    problems = validate_ready()
+    table = Table.grid(expand=True, padding=(0, 2))
+    table.add_column()
+    table.add_column()
+    table.add_column()
+    table.add_row(
+        f"[press.muted]Sources[/press.muted]\n[bold]{len(books)}[/bold]",
+        f"[press.muted]Finished[/press.muted]\n[bold]{len(outputs)}[/bold]",
+        f"[press.muted]Provider[/press.muted]\n[bold]{get_provider_info()['label']}[/bold]",
+    )
+    state = "[press.good]Ready to translate[/press.good]" if not problems else f"[press.danger]{problems[0]}[/press.danger]"
+    table.add_row("", "", state)
+    return table
 
 
 def list_books() -> list:
@@ -54,15 +120,22 @@ def pick_book(prompt: str):
         return None
     choices = [questionary.Choice(title=book.name, value=book) for book in books]
     choices.append(questionary.Choice(title="(cancel)", value=None))
-    return questionary.select(prompt, choices=choices).ask()
+    return questionary.select(
+        prompt,
+        choices=choices,
+        use_search_filter=len(books) > 8,
+        instruction="(arrows to move, type to filter)" if len(books) > 8 else "(arrows to move)",
+    ).ask()
 
 
 def run_translation_with_progress(book: Path) -> None:
     progress = Progress(
-        TextColumn("{task.description}"),
+        SpinnerColumn(style="press.accent"),
+        TextColumn("[bold]{task.description}[/bold]"),
         BarColumn(),
-        TextColumn("{task.percentage:>3.0f}%"),
+        TaskProgressColumn(),
         TimeElapsedColumn(),
+        TimeRemainingColumn(),
         console=console,
     )
     with progress:
@@ -110,18 +183,32 @@ def translate_flow() -> None:
 
 
 def edit_glossary(scope: str) -> None:
+    filter_text = ""
     while True:
         terms = load_glossary(scope)
         title = "Shared glossary (all books)" if scope == GLOBAL_NAME else f"Glossary for: {scope}"
-        console.print(Panel(f"[bold]{title}[/bold]  ({len(terms)} terms)"))
-        if terms:
-            for i, (src, dst) in enumerate(terms.items(), 1):
-                console.print(f"  {i}. {src}  ->  {dst}")
+        app_header("Terminology desk")
+        visible = [
+            (src, dst) for src, dst in terms.items()
+            if not filter_text or filter_text.casefold() in f"{src} {dst}".casefold()
+        ]
+        console.print(f"[bold]{title}[/bold]  [press.muted]{len(terms)} terms[/press.muted]")
+        if filter_text:
+            console.print(f"[press.accent]Filter:[/press.accent] {filter_text}  ({len(visible)} matching)")
+        if visible:
+            table = Table(box=box.SIMPLE, show_header=True, header_style="press.muted", expand=True)
+            table.add_column("Chinese", ratio=1)
+            table.add_column("English", ratio=2)
+            for src, dst in visible[:40]:
+                table.add_row(src, dst)
+            console.print(table)
+            if len(visible) > 40:
+                console.print(f"[press.muted]Showing 40 of {len(visible)}. Use search to narrow the sheet.[/press.muted]")
         else:
-            console.print("  (empty)")
+            console.print("[press.muted]No matching terms.[/press.muted]")
         action = questionary.select(
             "Actions",
-            choices=["Add a term", "Edit a term", "Delete a term", "Back"],
+            choices=["Add a term", "Search / filter", "Edit a term", "Delete a term", "Back"],
         ).ask()
         if action == "Add a term":
             src = questionary.text("Chinese term (e.g. 丹田):").ask()
@@ -130,6 +217,11 @@ def edit_glossary(scope: str) -> None:
                 if dst:
                     added = add_terms(scope, {src: dst})
                     console.print(f"[green]Added {added} term(s).[/green]")
+        elif action == "Search / filter":
+            filter_text = (questionary.text(
+                "Chinese or English text (blank clears filter):",
+                default=filter_text,
+            ).ask() or "").strip()
         elif action == "Edit a term":
             if not terms:
                 continue
@@ -244,17 +336,20 @@ def settings_flow() -> None:
         masked = (key[:6] + "..." + key[-4:]) if len(key) > 12 else "(empty)"
         info = get_provider_info()
         thinking = get_extra_body().get("thinking", {}).get("type", "n/a")
-        console.print(
-            Panel(
-                "[bold]Settings[/bold]\n"
-                f"Provider: {get_provider()} ({info['label']})\n"
-                f"API key: {masked}\n"
-                f"Model: {get_model()}   API: {get_base_url()}\n"
-                f"Parallel requests: {get_concurrency()}   Mode: {thinking}\n"
-                f"Fill mode: {get_fill_thinking()}   Retries: {get_max_retries()}\n"
-                f"Token budget: {get_token_budget('book.epub'):,} (test: {get_token_budget('Test_.epub'):,})"
-            )
-        )
+        console.clear()
+        app_header("Press configuration")
+        table = Table.grid(expand=True, padding=(0, 2))
+        table.add_column(style="press.muted")
+        table.add_column()
+        table.add_row("Provider", f"{info['label']}  [press.muted]({get_provider()})[/press.muted]")
+        table.add_row("API key", "Not required" if info.get("api_key_optional") and key == "local-router" else masked)
+        table.add_row("Model", get_model())
+        table.add_row("Endpoint", get_base_url())
+        table.add_row("Pipeline", f"{get_pipeline()}  ·  strict={get_strict_one_pass()}")
+        table.add_row("Run", f"{get_concurrency()} parallel  ·  {get_chapter_limit() or 'all'} chapters  ·  {get_max_group_tokens():,} group tokens")
+        table.add_row("Modes", f"translate={thinking}  ·  fill={get_fill_thinking()}  ·  retries={get_max_retries()}")
+        table.add_row("Budget", f"{get_token_budget('book.epub'):,} normal  ·  {get_token_budget('Test_.epub'):,} test")
+        console.print(Panel(table, border_style="press.muted", padding=(1, 2)))
         choice = questionary.select(
             "Actions",
             choices=[
@@ -263,6 +358,9 @@ def settings_flow() -> None:
                 "Change model",
                 "Change base URL",
                 "Change concurrency",
+                "Change pipeline",
+                "Change chapter limit",
+                "Change group size",
                 "Change mode (speed vs. quality)",
                 "Change fill mode (structure mapping)",
                 "Change token budget",
@@ -281,6 +379,9 @@ def settings_flow() -> None:
             if new_provider:
                 settings = load_settings()
                 settings["provider"] = new_provider
+                preset = PROVIDER_PRESETS[new_provider]
+                settings["base_url"] = preset["base_url"]
+                settings["model"] = preset["models"][0] if preset["models"] else ""
                 save_settings(settings)
                 console.print(f"[green]Provider switched to {new_provider}.[/green]")
         elif choice == "Set / change API key":
@@ -327,6 +428,45 @@ def settings_flow() -> None:
                 console.print("[green]Concurrency saved.[/green]")
             elif new_value:
                 console.print(f"[yellow]Concurrency must be 1-{CONCURRENCY_MAX}.[/yellow]")
+        elif choice == "Change pipeline":
+            pipeline = questionary.select(
+                "Translation pipeline",
+                choices=[
+                    questionary.Choice(title="One-pass — recommended, cheaper", value="one-pass"),
+                    questionary.Choice(title="Two-pass — reuse substantial legacy cache", value="two-pass"),
+                ],
+                default=get_pipeline(),
+            ).ask()
+            if pipeline:
+                settings = load_settings()
+                settings["pipeline"] = pipeline
+                if pipeline == "one-pass":
+                    settings["strict_one_pass"] = questionary.confirm(
+                        "Stop a chapter if the numbered protocol cannot be repaired?",
+                        default=get_strict_one_pass(),
+                    ).ask()
+                save_settings(settings)
+                console.print("[press.good]Pipeline saved.[/press.good]")
+        elif choice == "Change chapter limit":
+            value = questionary.text(
+                "Chapters per run (0 = all):", default=str(get_chapter_limit())
+            ).ask()
+            if value and value.isdigit():
+                settings = load_settings()
+                settings["chapter_limit"] = int(value)
+                save_settings(settings)
+                console.print("[press.good]Chapter limit saved.[/press.good]")
+        elif choice == "Change group size":
+            value = questionary.text(
+                "Maximum tokens per translation group:", default=str(get_max_group_tokens())
+            ).ask()
+            if value and value.isdigit() and int(value) >= 500:
+                settings = load_settings()
+                settings["max_group_tokens"] = int(value)
+                save_settings(settings)
+                console.print("[press.good]Group size saved.[/press.good]")
+            elif value:
+                console.print("[press.danger]Enter an integer of at least 500.[/press.danger]")
         elif choice == "Change mode (speed vs. quality)":
             new_mode = questionary.select(
                 "Mode",
@@ -391,34 +531,30 @@ def settings_flow() -> None:
 
 def main_menu() -> None:
     while True:
-        books = list_books()
-        api_state = "API key: set" if get_api_key() else "API key: NOT set"
-        console.print(
-            Panel(
-                f"[bold]Web Novel EPUB Translator[/bold]  (Chinese -> English)\n"
-                f"Books in 'books' folder: {len(books)}   {api_state}"
-            )
-        )
+        console.clear()
+        app_header()
+        console.print(Panel(status_overview(), border_style="press.muted", padding=(1, 2)))
         choice = questionary.select(
-            "What do you want to do?",
+            "Choose a desk",
             choices=[
-                "Translate a book",
-                "Manage glossary",
-                "Scan a book for new terms",
-                "Check translation quality",
-                "Settings",
-                "Quit",
+                questionary.Choice("Translate a book       Costed, resumable press run", value="translate"),
+                questionary.Choice("Manage glossary       Curate approved terminology", value="glossary"),
+                questionary.Choice("Scan for terms        Discover names before translation", value="scan"),
+                questionary.Choice("Quality check         Offline consistency proof", value="qa"),
+                questionary.Choice("Settings              Provider, pipeline, and limits", value="settings"),
+                questionary.Choice("Quit", value="quit"),
             ],
+            instruction="(arrows to move, enter to open)",
         ).ask()
-        if choice == "Translate a book":
+        if choice == "translate":
             translate_flow()
-        elif choice == "Manage glossary":
+        elif choice == "glossary":
             glossary_flow()
-        elif choice == "Scan a book for new terms":
+        elif choice == "scan":
             scan_flow()
-        elif choice == "Check translation quality":
+        elif choice == "qa":
             qa_flow()
-        elif choice == "Settings":
+        elif choice == "settings":
             settings_flow()
         else:
             console.print("Goodbye!")

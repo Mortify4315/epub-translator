@@ -15,18 +15,28 @@ def settings_payload():
     masked = (key[:6] + "…" + key[-4:]) if len(key) > 12 else "(not set)"
     provider = core.config.get_provider()
     info = core.config.get_provider_info(provider)
+    optional_key = bool(info.get("api_key_optional"))
+    configured_key = bool(key and key != "local-router")
     return {
         "provider": provider,
         "providers": [
-            {"name": name, "label": info2["label"]}
+            {
+                "name": name,
+                "label": info2["label"],
+                "base_url": info2["base_url"],
+                "models": info2["models"],
+                "api_key_optional": bool(info2.get("api_key_optional")),
+            }
             for name, info2 in core.config.PROVIDER_PRESETS.items()
         ],
         "provider_label": info["label"],
         "models": info["models"],
         "thinking_supported": info["thinking"],
         "env_key": info["env_key"],
-        "api_key_set": bool(key),
-        "api_key_masked": masked,
+        "api_key_set": bool(key) or optional_key,
+        "api_key_optional": optional_key,
+        "api_key_configured": configured_key,
+        "api_key_masked": masked if configured_key else "(not required)" if optional_key else "(not set)",
         "model": core.config.get_model(),
         "base_url": core.config.get_base_url(),
         "concurrency": core.config.get_concurrency(),
@@ -53,16 +63,24 @@ def update_settings():
         provider = str(data["provider"]).strip()
         if provider not in core.config.PROVIDER_PRESETS:
             abort(400, f"Unknown provider '{provider}'.")
+        previous_provider = str(s.get("provider") or core.config.DEFAULT_PROVIDER).strip()
         if provider == "custom":
             # The custom provider has no default base URL — refusing to save a
             # state that would only fail at request time with an opaque error.
             # (An env-var override is also a valid source.)
             base = (str(data.get("base_url") or "").strip()
-                    or str(s.get("base_url") or "").strip()
+                    or (str(s.get("base_url") or "").strip()
+                        if previous_provider == "custom" else "")
                     or os.environ.get("CUSTOM_LLM_BASE_URL", "").strip())
             if not base:
                 abort(400, "provider 'custom' requires a base_url (any OpenAI-compatible endpoint).")
         s["provider"] = provider
+        if provider != previous_provider:
+            preset = core.config.get_provider_info(provider)
+            if "base_url" not in data:
+                s["base_url"] = preset["base_url"]
+            if "model" not in data:
+                s["model"] = preset["models"][0] if preset["models"] else ""
 
     if "api_key" in data and str(data["api_key"]).strip():
         # Write to the slot for the provider being saved (or the active one).

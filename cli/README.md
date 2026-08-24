@@ -1,6 +1,6 @@
 # Web Novel EPUB Translator
 
-Translate Chinese web novels (EPUB) into English using any OpenAI-compatible LLM API — DeepSeek, OpenCode Go, OpenAI, Anthropic Claude, Google Gemini, xAI Grok, Groq, Mistral, OpenRouter, or a custom endpoint — with a shared + per-novel glossary for consistent names, skills, and terms.
+Translate Chinese web novels (EPUB) into English using any OpenAI-compatible LLM API — DeepSeek, OpenCode Go, local 9Router, OpenAI, Anthropic Claude, Google Gemini, xAI Grok, Groq, Mistral, OpenRouter, or a custom endpoint — with a shared + per-novel glossary for consistent names, skills, and terms.
 
 ## How to use
 
@@ -10,7 +10,7 @@ Translate Chinese web novels (EPUB) into English using any OpenAI-compatible LLM
 4. Put your `.epub` files in the **`books`** folder.
 5. Use the menu:
    - **Scan a book for new terms** — automatically finds character names / skills / terms and proposes English translations for you to approve.
-   - **Manage glossary** — add, edit, or delete terms (shared = all books, or per book).
+   - **Manage glossary** — search, add, edit, or delete terms (shared = all books, or per book).
    - **Translate a book** — shows a cost estimate, then translates with a live progress bar. The English book appears in **`out`**.
    - **Check translation quality** — scans the finished book for terms translated inconsistently.
 6. Re-running a translation resumes from its cache (`cache/`), so a crash costs nothing. Switching provider, model, or base URL clears the cache for that book (outputs may differ between providers).
@@ -33,11 +33,16 @@ Translate Chinese web novels (EPUB) into English using any OpenAI-compatible LLM
 
 ## Environment variables (optional)
 
-- `EPUB_PROVIDER` — active provider (`deepseek`, `opencode-go`, `openai`, `anthropic`, `gemini`, `xai`, `groq`, `mistral`, `openrouter`, `custom`).
+- `EPUB_PROVIDER` — active provider (`deepseek`, `opencode-go`, `9router`, `openai`, `anthropic`, `gemini`, `xai`, `groq`, `mistral`, `openrouter`, `custom`).
 - `<PROVIDER>_API_KEY` — overrides the saved API key (e.g. `DEEPSEEK_API_KEY`, `OPENCODE_GO_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`).
 - `<PROVIDER>_MODEL` — overrides the model (e.g. `DEEPSEEK_MODEL`, `OPENCODE_GO_MODEL`).
 - `<PROVIDER>_BASE_URL` — overrides the API endpoint (provider defaults: DeepSeek `https://api.deepseek.com`, OpenCode Go `https://opencode.ai/zen/go/v1`, OpenAI `https://api.openai.com/v1`, Anthropic `https://api.anthropic.com/v1`, Gemini `https://generativelanguage.googleapis.com/v1beta/openai/`, …).
 - `EPUB_THINKING`, `EPUB_FILL_THINKING` — override thinking modes.
+
+The **9Router (local)** preset targets `http://localhost:20128/v1`, offers
+`fusion-panel`, `qd/auto`, and `qd/ultimate`, and does not require an API key by
+default. Override it with `NINEROUTER_BASE_URL`, `NINEROUTER_MODEL`, or
+`NINEROUTER_API_KEY` if needed.
 
 The app speaks the OpenAI chat-completions wire format, so any OpenAI-compatible endpoint works. The "thinking" translate/fill modes apply to DeepSeek-family providers (DeepSeek, OpenCode Go); other providers ignore them.
 
