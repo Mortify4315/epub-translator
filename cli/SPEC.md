@@ -1,4 +1,4 @@
-# SPEC — Web Novel EPUB Translator
+# SPEC — Jade Scroll Press
 
 Status: active development · Last updated: 2026-08-03 · Runtime: `.venv` (Python 3.13.14, supports 3.11–3.13)
 

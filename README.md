@@ -1,4 +1,4 @@
-# Web Novel EPUB Translator
+# Jade Scroll Press
 
 Translate Chinese web novels (EPUB) into English through any OpenAI-compatible provider, with a shared + per-novel glossary for consistent names, skills, and terms. The local browser and terminal interfaces share the same engine and data.
 
@@ -22,7 +22,7 @@ Two frontends live in this repository, sharing the same core:
 3. Choose a provider on first use. Most providers need an API key, stored locally in `cli/settings.json` and never committed. The local 9Router preset works without one by default.
 4. Drop `.epub` files into `cli/books/`.
 
-The WebUI uses the **Novel Press** production workflow: prepare terminology, estimate and translate, then verify consistency. It includes light/dark themes, live resumable job progress, finished outputs, glossary import/export, and a mobile layout. The TUI exposes the same readiness, provider, pipeline, and run-limit controls in a terminal-friendly form.
+The WebUI uses the **Jade Scroll Press** production workflow: prepare terminology, estimate and translate, then verify consistency. It includes light/dark themes, live resumable job progress, finished outputs, glossary import/export, and a mobile layout. The TUI exposes the same readiness, provider, pipeline, and run-limit controls in a terminal-friendly form.
 
 ## Local 9Router
 

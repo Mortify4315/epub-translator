@@ -81,7 +81,7 @@ def app_header(section: str = "Production desk") -> None:
     header.add_column(ratio=1)
     header.add_column(justify="right")
     header.add_row(
-        "[press.brand]NOVEL PRESS[/press.brand]  [press.muted]EPUB translator[/press.muted]",
+        "[press.brand]JADE SCROLL PRESS[/press.brand]  [press.muted]EPUB translator[/press.muted]",
         f"[press.muted]{section}[/press.muted]",
     )
     console.print(Panel(header, border_style="press.muted", padding=(0, 1)))

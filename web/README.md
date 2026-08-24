@@ -1,4 +1,4 @@
-# Web Novel EPUB Translator — Web GUI
+# Jade Scroll Press — Web GUI
 
 Browser interface for the [epub-translator](https://github.com/Mortify4315/epub-translator) project.
 Lets a non-technical user upload books, translate with live progress, manage glossaries,
@@ -34,7 +34,7 @@ folder before running.
   strict one-pass mode, chapter limit, group size, translate mode, and fill mode.
   Changing translation identity settings clears the affected cache.
 
-The responsive Novel Press interface supports light/dark themes, keyboard navigation,
+The responsive Jade Scroll Press interface supports light/dark themes, keyboard navigation,
 live job recovery, a completed-output shelf, and a 390px-wide mobile layout without
 horizontal scrolling. `Alt+1` through `Alt+5` switch primary views.
 

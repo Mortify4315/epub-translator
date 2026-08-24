@@ -29,8 +29,8 @@ def index():
         return send_from_directory("static", "workspace.html")
     return (
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-        "<title>Web Novel EPUB Translator</title></head><body>"
-        "<h1>Web Novel EPUB Translator</h1><p>Frontend not built yet.</p></body></html>"
+        "<title>Jade Scroll Press</title></head><body>"
+        "<h1>Jade Scroll Press</h1><p>Frontend not built yet.</p></body></html>"
     )
 
 

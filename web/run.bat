@@ -1,7 +1,7 @@
 @echo off
 setlocal
 chcp 65001 >nul
-title Web Novel EPUB Translator - Web GUI
+title Jade Scroll Press - Web GUI
 cd /d "%~dp0"
 
 set "PY="

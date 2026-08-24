@@ -1,6 +1,6 @@
-# Novel Press Design System
+# Jade Scroll Press Design System
 
-Novel Press treats EPUB translation as publication production, not an AI chat. The interface should feel like a quiet pressroom: literary, precise, and trustworthy during long-running paid work.
+Jade Scroll Press treats EPUB translation as publication production, not an AI chat. The interface should feel like a quiet pressroom: literary, precise, and trustworthy during long-running paid work.
 
 ## Visual Direction
 
@@ -23,7 +23,7 @@ Novel Press treats EPUB translation as publication production, not an AI chat. T
 
 ## Shared Product Language
 
-The WebUI and TUI share the Novel Press name, editorial headings, Prepare/Translate/Verify workflow, readiness language, and restrained accent colors. They do not need pixel-equivalent layouts: the browser prioritizes responsive sheets while the terminal prioritizes scannable tables and concise prompts.
+The WebUI and TUI share the Jade Scroll Press name, editorial headings, Prepare/Translate/Verify workflow, readiness language, and restrained accent colors. They do not need pixel-equivalent layouts: the browser prioritizes responsive sheets while the terminal prioritizes scannable tables and concise prompts.
 
 ## Core Tokens
 

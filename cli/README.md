@@ -1,4 +1,4 @@
-# Web Novel EPUB Translator
+# Jade Scroll Press
 
 Translate Chinese web novels (EPUB) into English using any OpenAI-compatible LLM API — DeepSeek, OpenCode Go, local 9Router, OpenAI, Anthropic Claude, Google Gemini, xAI Grok, Groq, Mistral, OpenRouter, or a custom endpoint — with a shared + per-novel glossary for consistent names, skills, and terms.
 

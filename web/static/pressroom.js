@@ -81,7 +81,7 @@ function showView(id, options = {}) {
   $("#view-" + view.id).classList.remove("hidden");
   $("#view-title").textContent = view.title;
   $("#view-description").textContent = view.description;
-  document.title = `${view.title} — Novel Press`;
+  document.title = `${view.title} — Jade Scroll Press`;
   if (!options.fromHash) history.replaceState(null, "", `#${view.id}`);
   if (options.focus) $("#main-content").focus();
 }

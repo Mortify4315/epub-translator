@@ -38,7 +38,7 @@ The product combines a resumable, cache-aware EPUB translation pipeline with sha
 
 ## Brand Commitments
 
-- Working product name: Web Novel EPUB Translator.
+- Working product name: Jade Scroll Press.
 - Explicit user commitment: both interfaces should feel modern, intentional, and product-specific—not generic “AI slop.”
 - Voice should be practical, calm, and direct for a non-technical operator.
 
